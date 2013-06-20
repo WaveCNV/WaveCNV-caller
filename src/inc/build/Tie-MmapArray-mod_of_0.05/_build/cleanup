@@ -1,0 +1,9 @@
+do{ my $x = {
+       'lib/Tie/MmapArray.o' => 1,
+       'blib/arch/auto/Tie/MmapArray/MmapArray.bundle' => 1,
+       'lib/Tie/MmapArray.xs' => 1,
+       'blib/arch/auto/Tie/MmapArray/MmapArray.bs' => 1,
+       'lib/Tie/MmapArray.c' => 1,
+       'blib' => 1
+     };
+$x; }
