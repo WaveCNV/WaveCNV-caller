@@ -1,4 +1,25 @@
 #!/usr/bin/perl
+
+#Hack to get around FindBin error where broken Carp is preloaded
+BEGIN {
+    if(@ARGV == 1 && $ARGV[0] eq 'findbin'){
+        eval 'require FindBin';
+        print $FindBin::RealBin;
+        exit;
+    }
+
+    my $Bin = `$0 findbin`;
+    eval "use lib '$Bin/../inc/lib'";
+    eval "use lib '$Bin/../inc/perl/lib'";
+    eval "use lib '$Bin/../../perl/lib'";
+    eval "use lib '$Bin/../../lib'";
+    eval "use lib '$Bin/../src/inc/lib'";
+    eval "use lib '$Bin/../src/inc/perl/lib'";
+    eval "use lib '$Bin/../src/lib'";
+    eval "use lib '$Bin/../perl/lib'";
+    eval "use lib '$Bin/../lib'";
+}
+
 use strict;
 use warnings;
 use GD;

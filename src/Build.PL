@@ -37,8 +37,10 @@ my $build = INSTALL::Build->new(
 	 'forks::shared'      => '0.34',
 	 'Statistics::Distributions' => 0,
 	 'Statistics::KernelEstimation' => 0,
+	 'Statistics::Distributions' => 0,
 	 'Term::ProgressBar' => 0,
 	 'IO::Interactive' => 0,
+	 'File::NFSLock' => '0',
 	 #'Other::Module' => '>= 1.2, != 1.5, < 2.0',
      },
      exe_requires => {
@@ -61,6 +63,7 @@ my $build = INSTALL::Build->new(
      },
      recommends => {
 	 'Carp'               => '1.24',
+	 'GD'                 => '0',
 	 #'Other::Module' => '>= 1.2, != 1.5, < 2.0',
      },
      install_base => "$FindBin::Bin/../",

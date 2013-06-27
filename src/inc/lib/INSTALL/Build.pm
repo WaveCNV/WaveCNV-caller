@@ -1044,9 +1044,12 @@ sub cpan_install {
     my ($self, $desired, $local) = @_;
 
     unless(File::Which::which('make')){
-	die "\n\nERROR: Cannot find 'make' on your system. If this is a Mac you\n".
-	    "will need to install xcode developer tools before you can\n".
-	    "continue. This can be done from the OS X installation disk.\n\n";
+	die "\n\n".
+            "ERROR: Cannot find 'make' on your system. If this is a Mac you will need\n".
+	    "to install Xcode developer tools before you can continue. This can be\n".
+	    "done from the OS X installation disk or downloaded from the App Store.\n".
+            "On some systems you must also select 'install command line tools' under\n".
+	    "the 'Downloads' section of the 'Xcode >> Preferences' menu\n\n";
     }
 
     if(! $local){
