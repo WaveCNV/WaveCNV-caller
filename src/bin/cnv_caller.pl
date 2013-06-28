@@ -63,9 +63,12 @@ BEGIN {
     ($tabix_exe) = grep {-f $_} ("$edir/*/tabix", File::Which::which('tabix')) if(!$tabix_exe);
     ($vcftools_exe) = grep {-f $_} ("$edir/*/bin/vcftools", File::Which::which('vcftools')) if(!$vcftools_exe);
     ($bgzip_exe = $tabix_exe) =~ s/tabix$/bgzip/; #comes with tabix
-
     $hg19 = "$FindBin::RealBin/../data/hg19_random.fa";
     $dummy = "$FindBin::RealBin/../data/dummy.bam";
+
+    #put tabix into path or vcf_tools throws a fit
+    (my $tab_dir = $tabix_exe) =~ s/[^\/]+$//;
+    $ENV{PATH} = "$tab_dir:$ENV{PATH}";
 
     #fix issue with debugger based restart
     my $last;
@@ -171,7 +174,8 @@ $OPT{maf_tail_filt} = 0.12;   #threshold for trimming MAF near 0
 $OPT{m_aln}         = 0.23;   #estimated fraction alignable by mouse
 $OPT{e_rate}        = 0.0005;  #NGS error rate (per bp per sequence)
 $OPT{basement}      = 0.05;   #basement expect for model distibutions
-$OPT{models}        = get_models(6); #i.e. 0:1, 1:2, etc. up to specified CN
+$OPT{cn_max}        = 5;
+$OPT{models}        = get_models($OPT{cn_max}); #i.e. 0:1, 1:2, etc. up to specified CN
 $OPT{lfrag}         = 1000; #use average SNP density as estimate
 
 #--get command line options
@@ -306,8 +310,11 @@ if($OPT{use_xeno}){
 if($OPT{cell}){
     print STDERR "#Estimating tumor cellularity...\n";
     ($OPT{cfrac}, $OPT{cfrac_rsq}) = estimate_cellularity(\%OPT);
-    $OPT{rfrac} = 1 - $OPT{cfrac};
-    
+    $OPT{rfrac}  = 1 - $OPT{cfrac};
+    $OPT{k_bins} = ceil($OPT{k_bins}/$OPT{cfrac}); #adust for cellularity
+    $OPT{cn_max} = ($OPT{cfrac} <= 0.25) ? 3 : 5;
+    $OPT{models} = get_models($OPT{cn_max});
+
     #archive the value
     $DBARC->{cfrac} = $OPT{cfrac};
     tie(my %DB, 'MLDBM', $OPT{DB_File}, O_RDWR, 0640) or die $!;
@@ -675,11 +682,18 @@ sub validate_options {
     $OPT->{ref}{bam_files} = \@rbam_files;
     $OPT->{xeno}{bam_files} = \@xbam_files;
     $OPT->{use_xeno}   = 1 if($OPT->{xcov});
-    $OPT->{cell}       = 1 if($OPT->{cfrac} < 1);
-    $OPT->{k_bins}     = ceil($OPT->{k_bins}/$OPT->{cfrac}); #adust for cellularity
     $OPT->{merge}      = 1 if($OPT->{smooth}); #implies merge
     $OPT->{outdir} = $outdir;
     $OPT->{base}   = $base;
+
+    #adust for cellularity
+    if($OPT->{cfrac} < 1){
+	$OPT->{cell}   = 1;
+	$OPT->{k_bins} = ceil($OPT->{k_bins}/$OPT->{cfrac});
+	$OPT->{cn_max}   = ($OPT->{cfrac} <= 0.25) ? 3 : 5;
+	$OPT->{models}   = get_models($OPT->{cn_max});
+    }
+
 
     if($OPT{ref}{sid} || $OPT{ref}{vcf_file}){
 	$OPT{use_ref} = 1;
@@ -1421,7 +1435,6 @@ sub add_vcf_data {
     my $maf_count   = 0;
     my $rmaf_count  = 0;
     my $xmaf_count  = 0;
-    my $rmaf_usable = 0;
     my %vcf_set;
     my %rvcf_set;
     my %xvcf_set;
@@ -1450,7 +1463,6 @@ sub add_vcf_data {
 			$rmaf_count++;
 			if($maf <= 1-$thr){
 			    $ref_ok{$chr}{$pos}++;
-			    $rmaf_usable++;
 			}
 		    }
 		}
@@ -1479,7 +1491,6 @@ sub add_vcf_data {
                         $rmaf_count++;
 			if($maf <= 1-$thr){
 			    $ref_ok{$chr}{$pos}++;
-			    $rmaf_usable++;
 			}
                     }
 		}
@@ -1565,7 +1576,6 @@ sub add_vcf_data {
 	$res->{ref}{cov_median} = $rcov_median;
 	$res->{ref}{maf_set}    = \%rmaf_set;
 	$res->{ref}{maf_count}  = $rmaf_count;
-	$res->{ref}{maf_usable} = $rmaf_usable;
     }
 
     if($OPT->{use_xeno}){
@@ -1602,7 +1612,14 @@ sub add_maf_stats {
     my $cfrac      = $OPT->{cfrac};
     my $rfrac      = 1 - $cfrac;
 
-    #for long segments sample around the mean
+    #get target frequencies (optimization for redundancy)
+    my %target_fs;
+    foreach my $m (@{$OPT->{models}}){
+	next if($m eq '!');
+	push(@{$target_fs{get_f_string($m, $cfrac)}}, $m);
+    }
+
+    #==for long segments sample around the mean to build expect
     my $exp_set;
     if($maf_count > 100 && defined($cov_mean)){
 	my $max = (3*$cov_mean)+1;
@@ -1629,109 +1646,120 @@ sub add_maf_stats {
 	}
 	my %new = (map {$_ => $all{$_}} @keys);
 	$exp_set = {0.5 => \%new}; #new smaller maf_set
+
+	#revise maf_count
+	$maf_count = 0;
+	while(my ($cov, $num) = each %new){
+	    $maf_count += $num;
+	}
     }
     else{
 	$exp_set = $maf_set; #all data
     }
 
-    #bin the observed MAF values
-    my $obs = maf_bin($maf_set, $OPT->{k_bins}, $OPT);
-
-    #get target frequencies (optimization for redundancy)
-    my %target_fs;
-    foreach my $m (@{$OPT->{models}}){
-	next if($m eq '!');
-	push(@{$target_fs{get_f_string($m, $cfrac)}}, $m);
-    }
-
-    #initialize score for each target
-    my %t_scores;
-    foreach my $t (keys %target_fs){
-	next if($t eq '!'); #temp 
-	$t_scores{$t} = 1;
-	$t_scores{"$t:xeno"} = 1 if($xcov);
-    }
-
+    #==score with normalized composite liklihood
+    #my %t_scores;
+    #foreach my $t (keys %target_fs){ #initialize score for each target
+    #	next if($t eq '!'); #temp 
+    #	$t_scores{$t} = 1;
+    #	$t_scores{"$t:xeno"} = 1 if($xcov);
+    #}
+    #
     #combine score for all mafs
-    keys %{$maf_set};
-    while(defined(my $maf = each %{$maf_set})){
-	keys %{$maf_set->{$maf}};
-        while(my ($cov, $num) = each %{$maf_set->{$maf}}){
-	    #calculate individual liklihoods
-	    my $max = 0;
-	    my %Ls;
-	    foreach my $t (keys %t_scores){
-		next if($t =~ /xeno$/); #would be redundant
-		my $i = int($maf*$cov+0.5); #round just in case
-		my $mod = $target_fs{$t}[0];
-		$Ls{$t} = _maf_point($i, $cov, $mod, $cfrac, 0, $OPT);
-		$max = $Ls{$t} if($Ls{$t} > $max);
-
-		next unless($xcov);
-		$Ls{"$t:xeno"} = _maf_point($i, $cov, $mod, $cfrac, $xcov, $OPT);
-		$max = $Ls{"$t:xeno"} if($Ls{"$t:xeno"} > $max);
-	    }
-	    next if($max == 0);
-
-	    #scale individual liklihoods
-	    my $maxt = 0;
-	    foreach my $t (keys %t_scores){
-		$t_scores{$t} *= ($Ls{$t}/$max)**$num;
-		$maxt = $t_scores{$t} if($t_scores{$t} > $maxt);
-	    }
-	    next if($maxt == 0);
-
-	    #scale combined liklihoods
-	    foreach my $t (keys %t_scores){
-		$t_scores{$t} /= $maxt;
-	    }
-	}
-    }
-
-    #add to final output
+    #keys %{$maf_set};
+    #while(defined(my $maf = each %{$maf_set})){
+    #	keys %{$maf_set->{$maf}};
+    #   while(my ($cov, $num) = each %{$maf_set->{$maf}}){
+    #	    #calculate individual liklihoods
+    #	    my $max = 0;
+    #	    my %Ls;
+    #	    foreach my $t (keys %t_scores){
+    #		next if($t =~ /xeno$/); #would be redundant
+    #		my $i = int($maf*$cov+0.5); #round just in case
+    #		my $mod = $target_fs{$t}[0];
+    #		$Ls{$t} = _maf_point($i, $cov, $mod, $cfrac, 0, $OPT);
+    #		$max = $Ls{$t} if($Ls{$t} > $max);
+    #
+    #		next unless($xcov);
+    #		$Ls{"$t:xeno"} = _maf_point($i, $cov, $mod, $cfrac, $xcov, $OPT);
+    #		$max = $Ls{"$t:xeno"} if($Ls{"$t:xeno"} > $max);
+    #	    }
+    #	    next if($max == 0);
+    # 
+    #       #scale individual liklihoods
+    #       foreach my $t (keys %t_scores){
+    #           $t_scores{$t} += ($Ls{$t}/$max)*$num; #composite liklihood
+    #       }
+    #   }
+    #}
+    #
+    #scale combined liklihoods
+    #my $maxt = 0;
+    #foreach my $t (keys %t_scores){
+    #    $maxt = $t_scores{$t} if($t_scores{$t} > $maxt);
+    #}
+    #next if($maxt == 0);
+    #normalizes and scales
+    #scaling still underestimates differences in liklihood
+    #$_ = ($_/$maxt)**$r->{maf_count} foreach (values %t_scores);
+    #
+    #add to final output hash
+    #my %maf_score;
+    #foreach my $t (keys %t_scores){
+    #	if($t =~ s/\:xeno$//){
+    #	    my @ms = @{$target_fs{$t}};
+    #	    $maf_score{"$_:xeno"}{L} = $t_scores{"$t:xeno"} foreach(@ms);
+    #	}
+    #	else{
+    #	    my @ms = @{$target_fs{$t}};
+    #	    $maf_score{$_}{L} = $t_scores{$t} foreach(@ms);
+    #	}
+    #}
+    
+    #==rss fit of models with AIC relative liklihoods
     my %maf_score;
-    foreach my $t (keys %t_scores){
-	if($t =~ s/\:xeno$//){
-	    my @ms = @{$target_fs{$t}};
-	    $maf_score{"$_:xeno"}{L} = $t_scores{"$t:xeno"} foreach(@ms);
-	}
-	else{
-	    my @ms = @{$target_fs{$t}};
-	    $maf_score{$_}{L} = $t_scores{$t} foreach(@ms);
-	}
-    }
-
-    #rss fit of models
+    my $obs = maf_bin($maf_set, $OPT->{k_bins}, $OPT); #bin the observed MAF values
     foreach my $t (keys %target_fs){
 	next if($t eq '!'); #temp
 	my @ms = @{$target_fs{$t}};
 	my $m = $ms[0];
 
-	my ($rss, $k) = (0, 1);
-	if($q_length > 30000){
+	my ($rss, $k, $aic) = (0, 1, 0);
+	if($q_length > 30000 && $maf_count){
 	    my $expect = maf_expect($exp_set, $m, $cfrac, 0, $OPT); #get expected MAF distribution
 	    ($rss, $k) = stat_fit($obs, $expect);
+	    $aic = $maf_count*log($rss/$maf_count)+2*$k;
 	}
 
 	#set all models with this target freq
-	foreach(@ms){
-	    $maf_score{$_}{rss} = $rss;
-	    $maf_score{$_}{k} = $k;
+	foreach my $m (@ms){
+	    $maf_score{$m}{rss} = $rss;
+	    $maf_score{$m}{k} = $k;
+	    $maf_score{$m}{AIC} = $aic;
 	}
 
-	if($xcov){
-	    if($q_length > 30000){
-		my $expect = maf_expect($exp_set, $m, $cfrac, $xcov, $OPT); #get expected MAF distribution
-		($rss, $k) = stat_fit($obs, $expect);
-	    }
+	#calculate for xenograft
+	next unless($xcov);
+	if($q_length > 30000 && $maf_count){
+	    my $expect = maf_expect($exp_set, $m, $cfrac, $xcov, $OPT); #get expected MAF distribution
+	    ($rss, $k) = stat_fit($obs, $expect);
+	    $aic = $maf_count*log($rss/$maf_count)+2*$k;
+	}
 
-	    foreach(@ms){
-		$maf_score{"$_:xeno"}{rss} = $rss;
-		$maf_score{"$_:xeno"}{k} = $k;
-	    }
+	foreach my $m (@ms){
+	    $maf_score{"$m:xeno"}{rss} = $rss;
+	    $maf_score{"$m:xeno"}{k} = $k;
+	    $maf_score{"$m:xeno"}{AIC} = $aic;
 	}
     }
 
+    #determine AIC relative liklihoods
+    my ($aic_min) = sort {$a <=> $b} (map {$_->{AIC}} values %maf_score);
+    foreach my $s (values %maf_score){
+	$s->{L} = exp(($aic_min-$s->{AIC})/2);
+    }
+
+    #==mark beast alleles
     _mark_best_alleles(\%maf_score, $OPT);
     $r->{maf_score} = \%maf_score;
 
@@ -1941,8 +1969,8 @@ sub _maf_point {
     my $thr      = $OPT->{maf_tail_filt};
 
     if($mod eq '!'){
-	#I really don't have a model yet
-	return 1/($cov+1);
+        #I really don't have a model yet
+        return 1/($cov+1);
     }
 
     #get model target frequencies
@@ -1951,7 +1979,7 @@ sub _maf_point {
 
     #create mixed tumor sample targets
     if($rfrac){
-	$_ = $rfrac + ($cfrac)*$_ foreach(@p);
+        $_ = $rfrac + ($cfrac)*$_ foreach(@p);
     }
 
     #normalize targets
@@ -1963,47 +1991,47 @@ sub _maf_point {
     #create weights
     my %wi;
     if(!$OPT->{use_ref}){ #expect error derived SNVs
-	%wi = ('0' => 999/1000);
-	for(my $i = 1; $i < @p; $i++){
-	    $wi{$p[$i]} += 1/1000 * 1/(@p-1);
-	}
+        %wi = ('0' => 999/1000);
+        for(my $i = 1; $i < @p; $i++){
+            $wi{$p[$i]} += 1/1000 * 1/(@p-1);
+        }
     }
     else{ #simpler model (there should only be two peaks)
-	$wi{$_} += 1/@p foreach @p;
-    } 
+        $wi{$_} += 1/@p foreach @p;
+    }
 
     #create xenograft target
     if($xcov){
-	my $adj = ($cov > $xcov) ? $xcov/$cov : 1;
+        my $adj = ($cov > $xcov) ? $xcov/$cov : 1;
 
-	#shift these to account for mouse shift
+        #shift these to account for mouse shift
 	foreach my $t (@p){
-	    $t = $t*(1-$adj);
-	}
+            $t = $t*(1-$adj);
+        }
 
-	#adjust weights (not true value, just a normlized estimate)
-	undef %wi;
-	$wi{$_} += 1/@p foreach @p;
-	if(!$OPT->{use_ref}){ #mouse peak not there when reference filtered
-	    my $wm = $m_aln/(1 - (1-$m_aln)**2);
-	    $wi{$_} += 1/@p * (1-$wm) foreach(@p);
-	    
-	    #mouse derived SNV peak
-	    my $xt = $adj;
-	    $wi{$xt} += $wm;
-	    push(@p, $xt);
-	}
+        #adjust weights (not true value, just a normlized estimate)
+        undef %wi;
+        $wi{$_} += 1/@p foreach @p;
+        if(!$OPT->{use_ref}){ #mouse peak not there when reference filtered
+            my $wm = $m_aln/(1 - (1-$m_aln)**2);
+            $wi{$_} += 1/@p * (1-$wm) foreach(@p);
+
+            #mouse derived SNV peak
+            my $xt = $adj;
+            $wi{$xt} += $wm;
+            push(@p, $xt);
+        }
     }
 
     #now get likilihoods from binomial
     my %L = (sum => 0);
     for(my $i = 0; $i < @p; $i++){
-	next if($L{$p[$i]}++);
-	my $t = $p[$i];
-	$t += ((1-$p[$i])*$e_rate) - ($p[$i]*$e_rate); #error adjusted target
-	
-	#liklihood around observed MAF
-	$L{sum} += binomial_pmf($k, $cov, $t)*$wi{$p[$i]};
+        next if($L{$p[$i]}++);
+        my $t = $p[$i];
+        $t += ((1-$p[$i])*$e_rate) - ($p[$i]*$e_rate); #error adjusted target                                            
+
+        #liklihood around observed MAF
+        $L{sum} += binomial_pmf($k, $cov, $t)*$wi{$p[$i]};
     }
 
     #normalization factor for threshold
@@ -2011,15 +2039,15 @@ sub _maf_point {
     $x-- if($x/$cov >= $thr);
     my $pstring = join(':', @p);
     if($thr && !$CUT{$thr}{$pstring}{$cov}){
-	my %C = (sum => 0);
-	for(my $i = 0; $i < @p; $i++){
-	    next if($C{$p[$i]}++);
-	    my $t = $p[$i];
-	    $t += ((1-$p[$i])*$e_rate) - ($p[$i]*$e_rate); #error adjusted target
-	    #liklihood around observed MAF
-	    $C{sum} += binomial_cmf($x, $cov, $t)*$wi{$p[$i]};
-	}
-	$CUT{$thr}{$pstring}{$cov} = $C{sum};
+        my %C = (sum => 0);
+        for(my $i = 0; $i < @p; $i++){
+            next if($C{$p[$i]}++);
+            my $t = $p[$i];
+            $t += ((1-$p[$i])*$e_rate) - ($p[$i]*$e_rate); #error adjusted target
+            #liklihood around observed MAF
+            $C{sum} += binomial_cmf($x, $cov, $t)*$wi{$p[$i]};
+        }
+        $CUT{$thr}{$pstring}{$cov} = $C{sum};
     }
     my $cut = $CUT{$thr}{$pstring}{$cov};
 
@@ -4396,6 +4424,8 @@ sub _assign_cn {
     my $OPT = shift;
 
     my $cn = _best_cn($r, $bc, $OPT);
+    my $cn_max = $OPT->{cn_max};
+    my $cfrac = $OPT->{cfrac};
 
     my $fin = $cn;
     if($r->{ref}){
@@ -4406,7 +4436,7 @@ sub _assign_cn {
         $points = $r->{maf_count} if($r->{maf_count} < $points);
         $points = 1 if($points < 1);
 
-	if($cn->{cn} <= 6 && $ccn->{cn} <= 6 && $r->{maf_count} > 15){
+	if($cn->{cn} <= $cn_max && $ccn->{cn} <= $cn_max && $r->{maf_count} > 15){
 	    if($ccn->{allele_L} > $cn->{allele_L} && $cn->{allele_L}/$ccn->{allele_L} < 0.1){
 		$fin = $ccn;
 	    }
@@ -4422,6 +4452,7 @@ sub _assign_cn {
 	}
 
 	#reference spikes make the calls unreliable
+	my $d_cn = abs($cn->{cn} - $ccn->{cn});
 	if($r->{ref}{ccor_f} >= 2.5){
 	    $fin = {cn       => '!',
 		    L        => 0,
@@ -4442,6 +4473,50 @@ sub _assign_cn {
                     allele   => '.',
                     allele_L => 0,
 		    allele_rss => 1000};
+	}
+	elsif($d_cn >= 2 && $d_cn/(0.5*($cn->{cn}+$ccn->{cn})) >= 0.3){ #too much variation
+	    $fin = {cn       => '.',
+                    L        => 0,
+                    allele   => '.',
+                    allele_L => 0,
+		    allele_rss => 1000};
+	}
+	elsif($cfrac < 1 && $cn->{cn} == 0){ #check internal ref of primary for lack of coverage
+	    my $rbc = $bc * $rfrac/$cfrac;
+	    my $x_adj = ($r->{xeno}) ? $r->{xeno}{cov_median}*$OPT->{xeno}{ccor_f} : $xcov*$m_aln;
+	    my $cne = ($r->{cov_median}-$x_adj)/$bc;
+	    $cne = 0 if($cne < 0);
+
+	    my $e_cov0 = int($cne)*$bc+$x_adj+(2*$bc*$rfrac)/($cfrac);
+	    my $e_cov1 = (int($cne)+1)*$bc+$x_adj+(2*$bc*$rfrac)/($cfrac);
+
+	    my $p0 = (int($cne) == 0) ? p_cov($r, -$e_cov1) : p_cov($r, $e_cov0); #expect of 0 causes issues
+	    my $p1 = p_cov($r, $e_cov1);
+
+	    my ($L0, $cn0, $L1, $cn1) = ($p0, int($cne), $p1, int($cne)+1);
+	    if($L0 > $L1){
+		$cne = $cn0;
+	    }
+	    elsif($L1 > $L0){
+		$cne = $cn1;
+	    }
+	    elsif($L0 == $L1){
+		if(logLr_cov($r, $e_cov0, $e_cov1) >= 0){
+		    $cne = $cn0;
+		}
+		else{
+		    $cne = $cn1;
+		}
+	    }
+
+	    #if ref internal to CNV is not diploid then everything is wrong
+	    if($cne != 2){
+		$fin = {cn       => '.',
+			L        => 0,
+			allele   => '.',
+			allele_L => 0,
+			allele_rss => 1000};
+	    }
 	}
 	else{ #is seg long enough to distinguish the ref copy number as different than 0
 	    my $e_cov0 = $bc;
@@ -4528,6 +4603,7 @@ sub _best_cn {
     my $models = $OPT->{models};
     my $m_aln  = $OPT->{m_aln};
     my $t_cov  = $OPT->{t_cov};
+    my $cn_max = $OPT->{cn_max};
     my $thr    = $OPT->{maf_tail_filt};
     my $rfrac  = 1 - $cfrac;
 
@@ -4542,7 +4618,7 @@ sub _best_cn {
     $maf_ignore = 1 if($r->{cov_median} <= 1);
     $maf_ignore = 1 if($rfrac && $r->{ref} && $r->{ref}{allele} =~ /^0/); #messes up MAF expect
     $maf_ignore = 1 if($r->{cov_median} < $t_cov/8); #if t_cov is 4 copy then 1/8 is closer to 0
-    if($cne >= 6 || $maf_ignore){
+    if($cne >= $cn_max || $maf_ignore){
 	my $e_cov0 = int($cne)*$bc+$x_adj+(2*$bc*$rfrac)/($cfrac);
 	my $e_cov1 = (int($cne)+1)*$bc+$x_adj+(2*$bc*$rfrac)/($cfrac);
 	my $p0 = (int($cne) == 0) ? p_cov($r, -$e_cov1) : p_cov($r, $e_cov0); #expect of 0 causes issues
@@ -4556,28 +4632,16 @@ sub _best_cn {
 	    ($cn0, $cn1) = ($cn1, $cn0);
 	}
 	elsif($L0 == $L1){
-	    if($cn0 == 0){ #SD near 0 is more like that of 1 copy
-		#I don't need to be exact, just need to know which is greater
-		if(p_cov($r, -$e_cov1, 1) >= p_cov($r, $e_cov1, 1)){
-		    ($L0, $L1) = ($p0, $p1);
-		}
-		else{
-		    ($L0, $L1) = ($p1, $p0);
-		    ($cn0, $cn1) = ($cn1, $cn0);
-		}
+	    if(logLr_cov($r, $e_cov0, $e_cov1) >= 0){
+		($L0, $L1) = ($p0, $p1);
 	    }
 	    else{
-		if(logLr_cov($r, $e_cov0, $e_cov1) >= 0){
-		    ($L0, $L1) = ($p0, $p1);
-		}
-		else{
-		    ($L0, $L1) = ($p1, $p0);
-		    ($cn0, $cn1) = ($cn1, $cn0);
-		}
+		($L0, $L1) = ($p1, $p0);
+		($cn0, $cn1) = ($cn1, $cn0);
 	    }
 	}
 	
-	if($cn0 > 6 || $maf_ignore){
+	if($cn0 > $cn_max || $maf_ignore){
 	    $ret->{cn}         = $cn0;
 	    $ret->{L}          = $L0;
 	    $ret->{allele}     = '.';
@@ -4741,7 +4805,8 @@ sub _fit_targets{
 	$sets{$tf} ||= [];
 	push(@{$sets{$tf}}, $s);
     }
-	
+    return $t_cov/2 if(!@test); #assume cn of 2
+    
     #fit closest for each target frequency
     my %peaks;
     foreach my $k (keys %sets){
@@ -4858,9 +4923,11 @@ sub estimate_cellularity {
     }
 
     #--find global MAF peaks
-    #sort and filter by degrea of diference between reference and sample MAF
-    #@res = sort {abs($b->[0]-$b->[1]) <=> abs($a->[0]-$a->[1])} @res;
-    #@res = @res[0..int(@res*0.7)];
+    my $tcov;
+    foreach my $s (@res){
+	$tcov += $s->[2];
+    }
+    $tcov /= @res;
 
     my $rker = Statistics::KernelEstimation->new();
     my $sker = Statistics::KernelEstimation->new();
@@ -4870,6 +4937,8 @@ sub estimate_cellularity {
 	$sker->add_data($s->[1]);
 	#only add different from reference
 	$fker->add_data($s->[1]) if($s->[0] != $s->[1]);
+	$s->[2] /= $tcov;
+	$s->[3] *= $s->[2];
     }
     
     #get global peaks of MAF
@@ -5107,13 +5176,16 @@ sub _estimate_cellularity_thread {
 	    }
 	    
 	    #for 1000 SNVs
-	    if(@bin >= 1000){ #1-2 Mb segment
+	    if(@bin >= 5000){ #1-2 Mb segment
 		my %rmaf_set;
+		my $rcov_mean;
 		foreach my $s (@rbin){
 		    my ($maf, $cov) = @$s;
 		    next if($maf < 0.5);
 		    $rmaf_set{$maf}{$cov}++;
+		    $rcov_mean += $cov;
 		}
+		$rcov_mean /= @rbin;
 
 		my $robs = maf_bin(\%rmaf_set, 100);
 		my $rbest;
@@ -5146,11 +5218,14 @@ sub _estimate_cellularity_thread {
 
 		#now fit sample
 		my %smaf_set;
+		my $scov_mean;
 		foreach my $s (@bin){
 		    my ($maf, $cov) = @$s;
 		    next if($maf < 0.5);
 		    $smaf_set{$maf}{$cov}++;
+		    $scov_mean += $cov;
 		}
+		$scov_mean /= @bin;
 
 		my $sobs = maf_bin(\%smaf_set, 100);
 		my $sbest;
@@ -5177,7 +5252,7 @@ sub _estimate_cellularity_thread {
 		undef @rbin;
                 next if(abs(0.5-$s_m) < abs(0.5-$r_m)); #sample is closer than ref
 
-		push(@$sres, [$r_m, $s_m]);
+		push(@$sres, [$r_m, $s_m, $rcov_mean, $scov_mean]);
 	    }
 	}
 
@@ -5262,17 +5337,17 @@ sub _coverage_fit {
     if(@test > 200){
 	#filter by distance from target frequency
 	@test = sort {abs($t_cov-$a->[0]{cov_median}) <=> abs($t_cov-$b->[0]{cov_median})} @test;
-	@test = @test[0..int(@test/2)];
+	@test = @test[0..int(@test*0.75)];
     }
     while(@test > 200){
 	#filter by longest
 	@test = sort {$b->[0]{q_length} <=> $a->[0]{q_length}} @test;
-	@test = @test[0..int(@test/2)];
+	@test = @test[0..int(@test*0.75)];
 	last if(@test <= 200);
 
 	#filter by closest matches with RSS
 	@test = sort { $a->[1]{rss} <=> $b->[1]{rss} } @test;
-	@test = @test[0..int(@test/2)];
+	@test = @test[0..int(@test*0.75)];
     }
     $_ = $_->[0] foreach(@test);
 
@@ -5284,24 +5359,27 @@ sub _coverage_fit {
     my $L_min;
     my $rss_min;
     my $rss_max;
-    my $max = $t_cov+sqrt($t_cov)/2 * ($cfrac)/($rfrac*2 + ($cfrac));
+    my $aicL_min;
+    my $aicL_max;
+    my $max = ($t_cov+sqrt($t_cov)*0.75) * ($cfrac)/($rfrac*2 + ($cfrac));
     my $min = ($t_cov * (4*$cfrac)/(2*$rfrac + (4*$cfrac)))/4; #if cn 4
     my $step = ($max/$min - $max/$max)/$points; #freq increase with each step
     for(my $f = $max/$max; $f <= $max/$min; $f+=$step){
 	my $t1 = $max/$f;
 	my $L_sum = 0;
 	my $rss_sum = 0;
+	my $aicL_sum = 0;
 	foreach my $r (@test){
 	    my @best;
 	    foreach my $m (@mod){
 		my $cn = get_c($m);
+		next if($cn eq '0');
 		
 		my $e_cov = $cn*$t1+(2*$t1*$rfrac)/($cfrac);
 		my $a_cov = ($cn+1)*$t1+(2*$t1*$rfrac)/($cfrac) if($e_cov == 0); #expect of 0 causes issues
 		my $pt = ($a_cov) ? p_cov($r, -$a_cov) : p_cov($r, $e_cov);
 		my $sc = $r->{maf_score}{$m};
 		my $cL = $pt;
-		#my $cL = $pt*$sc->{L};
 		if(!@best || $cL > $best[0] || ($cL == $best[0] && $sc->{rss} < $best[1]->{rss})){
 		    @best = ($cL, $sc, $m);
 		}
@@ -5312,40 +5390,42 @@ sub _coverage_fit {
 		$pt = p_cov($r, $e_cov);
 		$sc = $r->{maf_score}{"$m:xeno"};
 		$cL = $pt;
-		#$cL = $pt*$sc->{L};
 		if(!@best || $cL > $best[0] || ($cL == $best[0] && $sc->{rss} < $best[1]->{rss})){
 		    @best = ($cL, $sc, $m);
 		}
 	    }
 	    $L_sum   += $best[0] * $r->{maf_count}; #length weighted liklihood
 	    $rss_sum += $best[1]->{rss}/$best[1]->{k} * $r->{maf_count}; #length weighted
+	    $aicL_sum += $best[1]->{L} * $r->{maf_count}; #length weighted
 	}
 	$L_min = $L_sum if(!defined($L_min) || $L_sum < $L_min);
 	$L_max = $L_sum if(!defined($L_max) || $L_sum > $L_max);
 	$rss_min = $rss_sum if(!defined($rss_min) || $rss_sum < $rss_min);
 	$rss_max = $rss_sum if(!defined($rss_max) || $rss_sum > $rss_max);
-	push(@stats, [$t1, $L_sum, $rss_sum]);
+	$aicL_min = $aicL_sum if(!defined($aicL_min) || $aicL_sum < $aicL_min);
+	$aicL_max = $aicL_sum if(!defined($aicL_max) || $aicL_sum > $aicL_max);
+	push(@stats, [$t1, $L_sum, $rss_sum, $aicL_sum]);
     }
 
     my @bcs;
     my @bcs2;
     my @dist;
     my @dist2;
-    my %index2;
+    my %index;
     my $last = 0;
     my $pass = 0;
     my $last2 = 0;
     my $pass2 = 0;
     my $max_sep;
     foreach my $s (@stats){
-	my ($t1, $L_sum, $rss_sum) = @$s;
+	my ($t1, $L_sum, $rss_sum, $aicL_sum) = @$s;
 
 	#scale the liklihood
-	$L_sum = (1 * ($L_sum-$L_min)/($L_max-$L_min)) + 0;
+	$L_sum = (1 * ($L_sum-$L_min)/($L_max-$L_min));
+	$aicL_sum = (1 * ($aicL_sum-$aicL_min)/($aicL_max-$aicL_min));
 
 	#scale the rss
-	$rss_sum = (1 * ($rss_sum-$rss_min)/($rss_max-$rss_min)) + 0;
-	#$rss_sum /= 3*$rss_min;
+	$rss_sum = (1 * ($rss_sum-$rss_min)/($rss_max-$rss_min));
 
 	my $sep = $L_sum - $rss_sum;
 	$max_sep = [$t1, $sep] if(!$max_sep || $sep > $max_sep->[1]);
@@ -5368,7 +5448,7 @@ sub _coverage_fit {
 
 	push(@dist, [$t1, $L_sum]);
 	push(@dist2, [$t1, $rss_sum]); #second distribution for missing peaks
-	$index2{$t1} = $sep;
+	$index{$t1} = [$L_sum, $rss_sum, $aicL_sum, $sep];
 	if($cross > 0){
 	    if(!$bcs[$pass] || $bcs[$pass][1] < $sep){
 		$bcs[$pass] = [$t1, $sep];
@@ -5385,7 +5465,7 @@ sub _coverage_fit {
 
     #add missing peaks
     my $peaks2 = find_peaks(\@dist2, int($points/2));
-    my @alt = map {[$_, $index2{$_}]} grep {$peaks2->{$_} == -1} keys %$peaks2;
+    my @alt = map {[$_, $index{$_}[3]]} grep {$peaks2->{$_} == -1} keys %$peaks2;
     if(@alt > @bcs){
 	foreach my $o (@alt){
 	    next if(grep {$_->[0] == $o->[0]} @bcs);
@@ -5417,6 +5497,12 @@ sub _coverage_fit {
     my %uniq;
     @bcs = grep{! $uniq{$_}++} @bcs;
 
+    #sort based on combined cov/MAF liklihood
+    @bcs = sort {$index{$b}[0]*$index{$b}[2] <=> $index{$a}[0]*$index{$a}[2]} @bcs;
+
+    #values lower in both coverage and liklihood are multiples of the base coverage
+    @bcs = grep {$_ >= $bcs[0]} @bcs;
+
     return (wantarray) ? @bcs : $bcs[0];
 }
 
@@ -5428,17 +5514,18 @@ sub refine_coverage {
 
     return 50 if($res->[0]->{is_generic});
 
-    my $cfrac = $OPT->{cfrac};
-    my $xcov  = $OPT->{xcov};
-    my $m_aln = $OPT->{m_aln};
-    my $thr   = $OPT->{maf_tail_filt};
-    my $rfrac = 1 - $cfrac;
+    my $cfrac  = $OPT->{cfrac};
+    my $xcov   = $OPT->{xcov};
+    my $m_aln  = $OPT->{m_aln};
+    my $cn_max = $OPT->{cn_max};
+    my $thr    = $OPT->{maf_tail_filt};
+    my $rfrac  = 1 - $cfrac;
 
     #test only those where best MAF fit is not LOH
     my $before = 0;
     my $after = 0;
-    my @cns = map {[]} (0..5);
-    my @loh = map {[]} (0..5);
+    my @cns = map {[]} (0..$cn_max);
+    my @loh = map {[]} (0..$cn_max);
     foreach my $r (@$res){
 	next if($r->{final}{cn} eq '.');
 	next if($r->{final}{cn} eq '!');

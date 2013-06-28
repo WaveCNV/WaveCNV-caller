@@ -38,6 +38,7 @@ my $build = INSTALL::Build->new(
 	 'Statistics::Distributions' => 0,
 	 'Statistics::KernelEstimation' => 0,
 	 'Statistics::Distributions' => 0,
+	 'Statistics::Regression' => 0,
 	 'Term::ProgressBar' => 0,
 	 'IO::Interactive' => 0,
 	 'File::NFSLock' => '0',
