@@ -4423,9 +4423,12 @@ sub _assign_cn {
     my $bc  = shift;
     my $OPT = shift;
 
-    my $cn = _best_cn($r, $bc, $OPT);
+    my $cn     = _best_cn($r, $bc, $OPT);
     my $cn_max = $OPT->{cn_max};
-    my $cfrac = $OPT->{cfrac};
+    my $xcov   = $OPT->{xcov};
+    my $m_aln  = $OPT->{m_aln};
+    my $cfrac  = $OPT->{cfrac};
+    my $rfrac  = 1 - $cfrac;
 
     my $fin = $cn;
     if($r->{ref}){
