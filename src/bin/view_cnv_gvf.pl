@@ -1,4 +1,5 @@
-#!/usr/bin/perl
+#!/usr/bin/perl 
+
 use strict;
 use warnings;
 
@@ -29,7 +30,7 @@ while(my $line = <$IN>){
     my @F = split("\t", $line);
     my %at = %{parse_att($F[8])};
     my $l = ($F[4]-$F[3]) +1;
-    print "$F[0]\t$F[3]\t$F[4]\t$l".
+    print "$F[0]\t$F[3]\t$F[4]\t$F[5]\t$l".
 	"\tcn=$at{Variant_copy_number}".
 	"\tu_cn=$at{ucor_cn}".
 	"\tc_cn=$at{ccor_cn}".

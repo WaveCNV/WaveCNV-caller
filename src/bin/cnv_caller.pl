@@ -243,7 +243,7 @@ $OPT{GAPS}            = get_chr_gaps($OPT{fasta});
 
 #--process stored settings
 $OPT{DB_File} = $OPT{outdir}.'/dbfile';
-tie(my %DB, 'MLDBM', $OPT{DB_File}, O_CREAT, 0640) or die $!;
+tie(my %DB, 'MLDBM', $OPT{DB_File}, O_CREAT|O_RDWR, 0640) or die $!;
 
 #check to see if the options are changed
 if(my $DBOPT = $DB{OPT}){
@@ -254,9 +254,9 @@ if(my $DBOPT = $DB{OPT}){
 		   bam_files
 		   fasta
 		   sid
-		   xcov
 		   cell
-		   cfrac);
+                   xcov
+                   cfrac);
 
     my @comp = ([\%OPT,$DBOPT],
 		[ref_param(\%OPT), ref_param($DBOPT)],
@@ -302,6 +302,12 @@ if($OPT{use_xeno}){
 	$OPT{xeno}{xcov} = estimate_xeno($OPT{xeno}{vcf_file}, xeno_param(\%OPT));
 	$OPT{xeno}{ccor_f} = $OPT{xcov}/$OPT{xeno}{xcov};
     }
+
+    #archive the value
+    $DBARC->{xcov} = $OPT{xcov};
+    tie(my %DB, 'MLDBM', $OPT{DB_File}, O_RDWR, 0640) or die $!;
+    $DB{ARC} = $DBARC;
+    untie(%DB);
 
     print STDERR "#Mean mouse coverage: $OPT{xcov}\n";
 }
@@ -436,7 +442,7 @@ if($OPT{use_ref}){
     my $exp = $OPT{ref}{chr_expects};
     foreach my $chr (sort {_chrom($a) <=> _chrom($b)} keys %$exp){
 	my $bc = $exp->{$chr};
-	print STDERR "#Reference adjust $chr base coverage: $bc\n";
+	#print STDERR "#Reference adjust $chr base coverage: $bc\n";
     }
 }
 print STDERR "#Sample segment median: $OPT{t_cov}\n";
@@ -446,7 +452,7 @@ print STDERR "#Sample ploidy mean: $OPT{ploidy_ave}\n\n";
 my $exp = $OPT{chr_expects};
 foreach my $chr (sort {_chrom($a) <=> _chrom($b)} keys %$exp){
     my $bc = $exp->{$chr};
-    print STDERR "#Sample Adjusted $chr base coverage: $bc\n";
+    #print STDERR "#Sample Adjusted $chr base coverage: $bc\n";
 }
 
 #--now write results to file
@@ -1578,7 +1584,7 @@ sub add_vcf_data {
 	$res->{ref}{maf_count}  = $rmaf_count;
     }
 
-    if($OPT->{use_xeno}){
+    if($OPT->{use_xeno} && ($OPT->{xeno}{vcf_file} || $OPT->{xeno}{sid})){
 	my ($xcov_mean, $xcov_median) = _cov_stats(\%xvcf_set);
 
 	$res->{xeno}{cov_vcf}    = \%xvcf_set;
@@ -2202,7 +2208,7 @@ sub _mark_best_alleles {
 	if($best){
             my $cmp = $L <=> $best->[1]{L} || $best->[1]{rss} <=> $rss;
 	    $cmp = 0 if($m eq '0:0' && $rfrac < $thr); #0 has no maf to match
-            $best = [$xm, $sc];
+            $best = [$xm, $sc] if($cmp == 1);
         }
         else{
             $best = [$xm, $sc];
@@ -4393,13 +4399,13 @@ sub assign_copy_number {
     my $OPT  = shift;
 
     #assign preliminary copy numbers
-    foreach my $r (@$res){
-	my $cn = _best_cn($r, $exp->{_ALL}, $OPT);
-	keys %$cn;
-	while(my ($key, $value) = each %$cn){
-	    $r->{final}{$key} = $value;
-	}
-    }
+    #foreach my $r (@$res){
+    #	my $cn = _best_cn($r, $exp->{_ALL}, $OPT);
+    #	keys %$cn;
+    #	while(my ($key, $value) = each %$cn){
+    #	    $r->{final}{$key} = $value;
+    #	}
+    #}
 
     #divide by chromosome
     my %sets;
@@ -4410,7 +4416,7 @@ sub assign_copy_number {
     #refine coverage by chromosome for final cn
     foreach my $chr (keys %sets){
 	my $set = $sets{$chr};
-	my $rc = refine_coverage($set, $exp->{_ALL}, $OPT->{models}, $OPT);
+	my $rc = $exp->{_ALL}; #refine_coverage($set, $exp->{_ALL}, $OPT->{models}, $OPT);
 	$exp->{$chr} = $rc;
 	foreach my $r (@$set){
 	    _assign_cn($r, $rc, $OPT);

@@ -1,0 +1,10 @@
+#examples use only VCF files (BAM provides more reolution but are not necessary)
+
+#run on cell line (with and without merging)
+perl ../bin/cnv_caller.pl test.seg test.vcf -sid C -rid R > test.gvf
+
+#run on mixed primary tumor sample with and without merging)
+perl ../bin/cnv_caller.pl test.seg test.vcf -sid P -rid R -cell > test.gvf 
+
+#run on xenograft sample with and without merging)
+perl ../bin/cnv_caller.pl test.seg test.vcf -sid X -rid R -xeno > test.gvf 
