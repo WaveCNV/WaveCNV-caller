@@ -1,4 +1,6 @@
-#examples use only VCF files (BAM provides more reolution but are not necessary)
+#Examples shown use only VCF files
+#BAM files can provide better resolution but are not used for the examples
+#because they are huge
 
 #run on cell line
 perl ../bin/cnv_caller.pl test.seg test.vcf -sid C -rid R > test_C.gvf
