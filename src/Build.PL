@@ -42,6 +42,7 @@ my $build = INSTALL::Build->new(
 	 'Term::ProgressBar' => 0,
 	 'IO::Interactive' => 0,
 	 'File::NFSLock' => '0',
+	 'MLDBM' => '0,
 	 #'Other::Module' => '>= 1.2, != 1.5, < 2.0',
      },
      exe_requires => {
