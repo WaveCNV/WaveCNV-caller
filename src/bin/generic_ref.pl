@@ -1,6 +1,27 @@
-#!/usr/bin/perl
-use threads;
-use threads::shared;
+#!/usr/bin/perl 
+
+#Hack to get around FindBin error where broken Carp is preloaded
+BEGIN {
+    if(@ARGV == 1 && $ARGV[0] eq 'findbin'){
+        eval 'require FindBin';
+        print $FindBin::RealBin;
+        exit;
+    }
+
+    my $Bin = `$0 findbin`;
+    eval "use lib '$Bin/../inc/lib'";
+    eval "use lib '$Bin/../inc/perl/lib'";
+    eval "use lib '$Bin/../../perl/lib'";
+    eval "use lib '$Bin/../../lib'";
+    eval "use lib '$Bin/../src/inc/lib'";
+    eval "use lib '$Bin/../src/inc/perl/lib'";
+    eval "use lib '$Bin/../src/lib'";
+    eval "use lib '$Bin/../perl/lib'";
+    eval "use lib '$Bin/../lib'";
+}
+
+use forks;
+use forks::shared;
 use strict;
 use warnings;
 use FindBin;
@@ -12,7 +33,7 @@ use File::Copy;
 
 my $bam_base = '/.mounts/labs/spbprojects/PCSI/data/analysis/somaticSNVtoDate6/';
 $bam_base = "/Users/cholt/hn1/lab_share/carson/pcsi_data/data2/" if(! -d $bam_base);
-my @samp = qw(PCSI0002 PCSI0005 PCSI0006 PCSI0024);
+my @samp = qw(PCSI0002R PCSI0005R PCSI0006R PCSI0022R PCSI0024R);
 my %CHRS = (chr1 => 249250621,
 	    chr2 => 243199373,
 	    chr3 => 198022430,
@@ -59,46 +80,61 @@ foreach my $s (@samp){
 }
 
 for (my $c = 1; $c < 10; $c++){
-    #threads->create(\&for_thread);
+    forks->create(\&for_thread);
+
 }
 for_thread();
 $_->join() foreach(threads->list());
 
 sub for_thread{
+    my $bin = 1000;
     while (my $job = shift @list){
-	my ($chr, $s) = split(/\t/, $job);
-	my $max = $CHRS{$chr};
-	my $bam = $files{$s};
-	my $sid = $s.'X';
-	my $store_file = "$sid\_$chr\_generic.store";
-	if(!-f $store_file){
-	    open(MM, ">$store_file") && close(MM); #create file
-	}
-
+	#initialize memory map
 	my @array;
-	tie @array, 'Tie::MmapArray', $store_file, { template => 'i', nels => $max};
-	for(my $i = 1; $i < $max; $i += 1000000){
+	my ($chr, $sid) = split(/\t/, $job);
+	my $nels = ceil($CHRS{$chr}/$bin);
+	my $store_file = "$sid\_$chr\_generic.store";
+	if(!-f $store_file){ open(MM, ">$store_file") && close(MM); } #create file
+	tie @array, 'Tie::MmapArray', $store_file, {template => 'd', nels => $nels};
+
+	#read BAM
+	my $bam = $files{$sid};
+	for(my $i = 1; $i < ($nels-1)*$bin; $i += 1000000){
+	    #get region
 	    my $start = $i;
 	    my $end = ($i + 1000000) - 1;
-	    $end = $max if($end > $max);    
-	    next if($array[$start-1] || $array[$end-1]);
+	    $end = ($nels-1)*$bin if($end > ($nels-1)*$bin);
     
-	    my $cov = get_bam_coverage($chr, $start, $end, $bam, $sid);
-	    #push(@array, @$cov); #push doesn't work on this tie yet
-	    my $offset = $start-1;
+	    #skip this region if already added
+	    next if($array[ceil($start/$bin)-1] || $array[ceil($end/$bin)-1]);
+
+	    #get coverage
+	    my $cov = get_bam_coverage($chr, $start, $end, $bam, $sid, 1000000/$bin);
+
+	    #add coverage to memory map
+	    my $offset = ceil($start/$bin) - 1;
 	    $array[$offset++] = $_ foreach(@$cov);
 	}
-	
-	my $mean = 0;
-	$mean += $_ foreach(@array);
-	$mean /= @array;
 
-	my $store_file2 = "$chr\_generic.store";
-	my @array2;
-	tie @array2, 'Tie::MmapArray', $store_file2, { template => 'i', nels => $max};
-	for(my $i = 0; $i < @array; $i++){
-	    $array2[$i] += $array[$i]/$mean * 1/@samp;
+	#do last region (will not be size $bin)
+	my $start = ($nels-1)*$bin + 1;
+	my $end = $CHRS{$chr};
+	if($start <= $end){
+	    my $cov = get_bam_coverage($chr, $start, $end, $bam, $sid, 1);
+	    my $offset = ceil($start/$bin) - 1;
+	    $array[$offset++] = $_ foreach(@$cov);
 	}
+
+	#my $mean = 0;
+	#$mean += $_ foreach(@array);
+	#$mean /= @array;
+
+	#my $store_file2 = "$chr\_generic.store";
+	#my @array2;
+	#tie @array2, 'Tie::MmapArray', $store_file2, { template => 'i', nels => $max};
+	#for(my $i = 0; $i < @array; $i++){
+	#    $array2[$i] += $array[$i]/$mean * 1/@samp;
+	#}
     }
 }
 
@@ -108,6 +144,7 @@ sub get_bam_coverage{
     my $end = shift;
     my $bam_files = shift;
     my $sid = shift;
+    my $div = shift;
 
     state %BAMS;
     state %RG;
@@ -153,16 +190,15 @@ sub get_bam_coverage{
 
     my $cov_list;
     if(!$sid || !$RG{$sid}{$chr}){
-        my ($obj) = $segment->features(-type => 'coverage');
+        my ($obj) = $segment->features(-type => "coverage:$div");
         $cov_list = $obj->coverage();
     }
     else{
         my ($SID) = grep {/$sid$/} keys %{$RG{$sid}{$chr}};
-        my ($obj) = $segment->features(-type => 'coverage',
+        my ($obj) = $segment->features(-type => "coverage:$div",
                                        -filter => $RG{$sid}{$chr}{$SID});
         $cov_list = $obj->coverage();
     }
-    $cov_list ||= [];
 
     return $cov_list;
 }

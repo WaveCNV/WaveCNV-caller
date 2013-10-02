@@ -1,0 +1,68 @@
+WaveCNV-caller
+
+1. Prerequisites for Deployment
+
+. Operation System:
+	Linux
+	Mac OSX
+
+. PERL:
+	Perl 5.10.0+
+  	BioPerl 1.6901 (exact version required)
+	Perl::Unsafe::Signals
+	Inline::C
+	forks
+	forks::shared
+	Statistics::Distributions
+	Statistics::KernelEstimation
+	Statistics::Regression
+	Term::ProgressBar
+	IO::Interactive
+	File::NFSLock
+
+.External programs:
+	Samtools (compiled with 'make dylibs')
+	VCFTools
+	Tabix
+
+NOTE: You may need administrator rights to install some modules and tools.
+
+
+2. Installing WaveCNV-caller
+
+. In a terminal window, change to the .../WaveCNV/caller/src/ directory.
+
+. Configure the installation by running 'perl Build.PL'  on the command line.
+
+. Answer questions as to the location of Samtools, VCFTools, and Tabix. If you
+  are missing any tools or modules, the installer will offer you a way to
+  automatically setup missing prerequisites.
+
+. Run './Build installdeps' to install any missing perl dependencies.
+
+. Run './Build installexes' to install any missing external tools.
+
+. Run './Build hg19' to download and install the human reference genome from
+  UCSC. Will be in the .../WaveCNV/caller/data/ directory
+
+. Run './Build install' to compile any needed code and install executables in
+  the .../WaveCNV/caller/bin/ directory. It is recommnded that you add this
+  directory to your PATH environmental variable.
+
+. You will have to manually install anything the installer fails to install
+  automatically.
+
+
+3. To run WaveCNV-caller
+
+. Run .../WaveCNV/caller/bin/caller.pl with a segments file (see WaveCNV-segmenter), a VCF file, and optionally a BAM file for the sample and associated matched control/refererence. It is important to always supply a matched reference.
+
+  Example: .../WaveCNV/segmenter/bin/segmenter.pl trio1.pileup
+
+. Example data is included in the .../WaveCNV/segmenter/example_data/ directory.
+
+
+4. WaveCNV-caller output
+
+. Results will be in GVF format
+

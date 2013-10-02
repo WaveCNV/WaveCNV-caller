@@ -131,9 +131,9 @@ Options:
 
      lfrag     <INT>     Sequencing fragment length (2x for paired end)
 
-     cell                Estimate copy fraction (akin to cellularity) of sample
+     cell                Estimate cellularity of mixed tumor sample
 
-     cfrac     <NUM>     Set copy fraction explicitly
+     cfrac     <NUM>     Set cellularity explicitly
 
      xeno                Estimate xenograft sample contamination
 
@@ -176,9 +176,7 @@ $OPT{maf_tail_filt} = 0.12;   #threshold for trimming MAF near 0
 $OPT{m_aln}         = 0.23;   #estimated fraction alignable by mouse
 $OPT{e_rate}        = 0.0005;  #NGS error rate (per bp per sequence)
 $OPT{basement}      = 0.05;   #basement expect for model distibutions
-$OPT{ref}{cn_max}   = 5;
 $OPT{cn_max}        = 5;
-$OPT{ref}{models}   = get_models($OPT{cn_max}+1); #i.e. 0:1, 1:2, etc. up to specified CN
 $OPT{models}        = get_models($OPT{cn_max}+1); #i.e. 0:1, 1:2, etc. up to specified CN
 $OPT{lfrag}         = 1000; #use average SNP density as estimate
 
@@ -357,10 +355,6 @@ $OPT{$_} = $DBARC->{$_} foreach(grep {!/^(ref|xeno)$/} keys %$DBARC);
 $OPT{ref}{$_} = $DBARC->{ref}{$_} foreach(keys %{$DBARC->{ref}});
 $OPT{xeno}{$_} = $DBARC->{xeno}{$_} foreach(keys %{$DBARC->{xeno}});
 
-#--now read in segments from file
-print STDERR "#Reading segment file...\n";
-my $segs = read_segment_file($OPT{seg_file}, \%OPT);
-
 #--build discovery segments
 print STDERR "#Loading data for initial parameter discovery...\n";
 my $disc = discovery_segments(\%OPT);
@@ -397,12 +391,12 @@ tie(%DB, 'MLDBM', $OPT{DB_File}, O_RDWR, 0640) or die $!;
 $DB{ARC} = $DBARC;
 untie(%DB);
 
-#--estimate tumor contamintation
+#--estimate tumor cellularity
 if($OPT{cell}){
-    print STDERR "#Estimating tumor contamination...\n";
-    ($OPT{cfrac}, $OPT{cfrac_rsq}, $OPT{hemi_center}) = estimate_copy_fraction($disc, \%OPT);
+    print STDERR "#Estimating tumor cellularity...\n";
+    ($OPT{cfrac}, $OPT{cfrac_rsq}, $OPT{hemi_center}) = estimate_cellularity($disc, \%OPT);
     $OPT{rfrac}  = 1 - $OPT{cfrac};
-    $OPT{k_bins} = ceil($OPT{k_bins}/$OPT{cfrac}); #adust for contamintation
+    $OPT{k_bins} = ceil($OPT{k_bins}/$OPT{cfrac}); #adust for cellularity
     if($OPT{cfrac} <= 0.30){  #MAF becomes less informative
 	$OPT{cn_max} = ($OPT{cfrac} <= 0.15) ? 1 : 3;
 	$OPT{models} = get_models($OPT{cn_max}+1);
@@ -413,11 +407,11 @@ if($OPT{cell}){
     $DB{ARC} = $DBARC;
     untie(%DB);
 
-    print STDERR "#Tumor base fraction: $OPT{cfrac}\n";
+    print STDERR "#Tumor cellularity: $OPT{cfrac}\n";
     print STDERR "#R^2 of fit: $OPT{cfrac_rsq}\n" if(defined $OPT{cfrac_rsq});
 }
 
-#--add MAF to discovery segments now I have found contamintation/xenograft etc.
+#--add MAF to discovery segments now I have found cellularity/xenograft etc.
 $disc = add_maf_discovery_stats($disc, \%OPT);
 
 #--calculate base coverage
@@ -457,6 +451,10 @@ print STDERR "#Sample base coverage (1 copy): $OPT{base_cov}\n";
 print STDERR "#Sample ploidy mode: $OPT{ploidy}\n";
 print STDERR "#Sample ploidy mean: $OPT{ploidy_ave}\n";
 print STDERR "\n";
+
+#--now read in segments from file
+print STDERR "#Reading segment file...\n";
+my $segs = read_segment_file($OPT{seg_file}, \%OPT);
 
 #--fill in the VCF/BAM data for segments
 print STDERR "#Loading/processing VCF/BAM data for segments...\n";
@@ -662,7 +660,7 @@ sub validate_options {
     $OPT->{outdir} = $outdir;
     $OPT->{base}   = $base;
 
-    #adust for contamintation
+    #adust for cellularity
     if($OPT->{cfrac} < 1){
 	$OPT->{cell}   = 1;
 	$OPT->{k_bins} = ceil($OPT->{k_bins}/$OPT->{cfrac});
@@ -2551,7 +2549,7 @@ sub view2 {
         #temp (used to remove xenograft datapoints)
         my $rAD = $v->{gtypes}{$RID}{AD} if($RID);
 	my $rcov;
-        my $rmaf = ($OPT->{use_ref}) ? 0 : 1;
+        my $rmaf;
         if($RID){
             next unless($rAD && $rAD ne '.');
             my ($rc, $ac) = split(/,/, $rAD);
@@ -2566,7 +2564,7 @@ sub view2 {
 
             if($cov > $OPT->{maf_cov_filt}){
                 my $maf = $ac/$cov;
-                #$maf = 0 if(!$rmaf || $rmaf < $OPT->{maf_tail_filt}); #temp
+                $maf = 0 if(!$rmaf || $rmaf < $OPT->{maf_tail_filt}); #temp
 
                 #create structure for R
                 push(@{$vcf_data{chr}},   $chrnum);
@@ -2626,8 +2624,7 @@ sub view2 {
 
         #binned coverage (easier to see on plot)
         my $cov_list;
-	my $bins = $length + 2*$pad;
-	$bins = 5000 if($bins > 5000);
+        my $bins = int($length/$OPT->{lfrag}) || 1;
         if(!$sid || !keys %{$RG{$btag}{$chr}}){
             my ($obj) = $segment->features(-type => "coverage:$bins");
             $cov_list = $obj->coverage();
@@ -2669,8 +2666,7 @@ sub view2 {
     unlink($tfile);
 
     #create image plot
-    my $pdf = "$SID\_$chr\_$start\-$end\_padding\_$pad.pdf";
-    $R->run(qq`pdf("$pdf",width=9,height=7.5,onefile=TRUE,paper='letter',pointsize=12)`);
+    $R->run(qq`pdf("test.pdf",width=9,height=7.5,onefile=TRUE,paper='letter',pointsize=12)`);
     if(@$bam_files){
         #inject BAM data
         my ($fh, $tfile) = tempfile();
@@ -2686,7 +2682,7 @@ sub view2 {
         $R->run(qq`opar <- par(mfrow=c(2,1));
                    mainstr <- sprintf("chr\%d:\%4.2f-\%4.2f (kb),  length=\%4.2f(kb) ,   cn=\%d",$chrnum,$start/1e3,$end/1e3,($length)/1e3,$cn);
                    plot(bam\$pos,bam\$cov,xlim=c($cs,$ce),pch=20,cex=1,main=mainstr);abline(v=c($start,$end),col=2);
-                   plot(vcf\$pos,vcf\$maf,xlim=c($cs,$ce),pch=20,cex=1,ylim=c(0,1),col="black");abline(v=c($start,$end),col=2);
+                   plot(vcf\$pos,vcf\$maf,xlim=c($cs,$ce),pch=20,cex=1,ylim=c(0,1),col="green");abline(v=c($start,$end),col=2);
                    par(opar);`);
     }
     else{
@@ -2694,14 +2690,12 @@ sub view2 {
         $R->run(qq`opar <- par(mfrow=c(2,1));
                    mainstr <- sprintf("chr\%d:\%4.2f-\%4.2f (kb),  length=\%4.2f(kb) ,   cn=\%d",$chrnum,$start/1e3,$end/1e3,($length)/1e3,$cn);
                    plot(vcf\$pos,vcf\$cov,xlim=c($cs,$ce),pch=20,cex=1,main=mainstr);abline(v=c($start,$end),col=2);
-                   plot(vcf\$pos,vcf\$maf,xlim=c($cs,$ce),pch=20,cex=1,ylim=c(0,1),col="black");abline(v=c($start,$end),col=2);
+                   plot(vcf\$pos,vcf\$maf,xlim=c($cs,$ce),pch=20,cex=1,ylim=c(0,1),col="green");abline(v=c($start,$end),col=2);
                    par(opar);`);
 
     }
     $R->run(q`dev.off()`); #close file and write
     $R->stop(); #call explictly because it is not getting destroyed
-
-    return $pdf;
 }
 
 #returns a list of target frequencies for a given model
@@ -2714,7 +2708,7 @@ sub get_f {
 
     my $tot = 0;
     my @p = grep {$_ ne 'xeno'} split(/:/, $mod);
-    map {$_ = $rfrac + $cfrac*$_; $tot += $_; $_} @p;
+    map {$_ = $rfrac + ($cfrac)*$_; $tot += $_; $_} @p;
 
     @p = (0, @p, $tot);
     for (@p){$_ /= $tot if($tot);}
@@ -2935,7 +2929,6 @@ sub _add_maf_discovery_stats_thread {
     while(my $file = shift @$work){
         my $res = Storable::retrieve($file);
 	foreach my $r (@$res){
-	    delete($r->{maf_score}); #just in case
 	    add_maf_stats($r, {%$OPT, maf_tail_filt => 0.5});
 	    if(my $ref = $r->{ref}){ #add coverage correction if available
 		my $param = ref_param($OPT);
@@ -3052,8 +3045,8 @@ sub sig_somatic {
     my $rp = ($OPT->{ref} && $OPT->{ref}{ploidy}) ? $OPT->{ref}{ploidy} : 2;
     my $sp = $OPT->{ploidy} || 2;
 
-    my $spc = $sp*$bc+($rp*$bc*$rfrac/$cfrac);
-    my $rpc = $rp*$bc+($rp*$bc*$rfrac/$cfrac);
+    my $spc = $sp*$bc+($rp*$bc*$rfrac)/($cfrac);
+    my $rpc = $rp*$bc+($rp*$bc*$rfrac)/($cfrac);
 
     #calculate if outside length adusted standard deviation of ploidies
     my $med = $r->{cov_median};
@@ -4580,7 +4573,7 @@ sub write_gvf {
 
     print $OUT "##gvf-version 1.06\n";
     print $OUT "#xenograft_coverage=".$OPT->{xcov}."\n";
-    print $OUT "#copy fraction (sample/total)=".$OPT->{cfrac}."\n";
+    print $OUT "#celularity=".$OPT->{cfrac}."\n";
     print $OUT "#target_expect=".$OPT->{t_cov}."\n";
     print $OUT "#base_coverage=".$OPT->{base_cov}."\n";
     print $OUT "#ploidy=".$OPT->{ploidy}."\n";
@@ -4831,7 +4824,7 @@ sub assign_cn {
 	elsif($rfrac && $cn->{cn} == 0){ #check internal ref of primary for lack of coverage
 	    my $rbc = $bc * $rfrac/$cfrac;
 	    $rbc *= $r->{ccor_f} if($r->{ccor_f});
-	    my $rcn = best_cn($r, 0, $rbc, {%$OPT, cfrac => 1, rfrac => 0});
+	    my $rcn = best_cn($r, 0, $rbc, ref_param($OPT));
 
 	    #if ref internal to CNV is not diploid then everything is wrong
 	    $fin = $loi if($rcn->{cn} <= 1);
@@ -4934,7 +4927,7 @@ sub logLr_cov {
     return ($m2-$m1) + int($k)*log($m1/$m2);
 }
 
-sub estimate_copy_fraction {
+sub estimate_cellularity {
     my $res = shift;
     my $OPT = shift;
     
@@ -5561,12 +5554,12 @@ sub _coverage_fit {
     my $rfrac  = 1 - $cfrac;
 
     #estimated target base coverages
-    my @bcs = (undef, map {$t_cov * $cfrac/(2*$rfrac + $_*$cfrac)} (1..4));
+    my @bcs = (undef, map {($t_cov * $_*$cfrac/(2*$rfrac + $_*$cfrac)) / $_} (1..4));
     my $n = $bcs[$#bcs]/(abs($bcs[$#bcs-1]-$bcs[$#bcs])/8)**2; #optimal points for smoother curve
 
     #get coverage that generages min RSS and max L
-    #my $max = (($t_cov+sqrt($t_cov)) * $cfrac/(2*$rfrac + 1*$cfrac))); #if cn 1 - SD
-    #my $min = (($t_cov-sqrt($t_cov)) * $cfrac/(2*$rfrac + 4*$cfrac))); #if cn 4 + SD
+    my $max = (($t_cov+sqrt($t_cov)) * $cfrac/(2*$rfrac + $cfrac)); #if cn 1 - SD
+    my $min = (($t_cov-sqrt($t_cov)) * 4*$cfrac/(2*$rfrac + 4*$cfrac)) / 4; #if cn 4 + SD
 
     #make list to test with (makes curve)
     my @test = 1..$#bcs;
@@ -5584,7 +5577,7 @@ sub _coverage_fit {
     my $cov_L_min;
     my $cov_L_max;
     foreach my $i (sort {$a <=> $b} @test){
-	my $t1 = $t_cov * $cfrac/(2*$rfrac + $i*$cfrac); #temp
+	my $t1 = ($t_cov * $i*$cfrac/(2*$rfrac + $i*$cfrac)) / $i; #temp
 	my $cov_L_sum = 0;
 	my $maf_L_sum = 0;
 	my $L_sum     = 0;
@@ -5641,8 +5634,6 @@ sub _coverage_fit {
     }
 
     #sort and filter candidates
-    shift @stats if($stats[0][0] == 1 && $cfrac < 0.15); #remove this one if resolution is too low
-    pop @stats if($stats[-1][0] == 4 && $cfrac < 0.15); #remove this one if resolution is too low
     @stats = sort {$b->[4] <=> $a->[4]} @stats; #most likly first
     @stats = grep {$_->[4]/$stats[0][4] > 0.1} @stats; #remove low liklihood
     @stats = grep {$_->[4]/$stats[0][4] > 0.5} @stats; #slightly more strict threshold
@@ -5653,7 +5644,7 @@ sub _coverage_fit {
     }
     elsif(@stats > 1){
 	shift @stats if($stats[0][0] == 4 && $stats[1][0] == 2);
-	shift @stats if(@stats > 1 && $stats[0][0] == 2 && $stats[1][0] == 1 && $cfrac > 0.3);
+	shift @stats if(@stats > 1 && $stats[0][0] == 2 && $stats[1][0] == 1);
 	$base = $stats[0];
     }
     else{

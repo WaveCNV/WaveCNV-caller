@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/perl 
 
 #Hack to get around FindBin error where broken Carp is preloaded
 BEGIN {
@@ -101,6 +101,7 @@ my %bins1;
 my %bins2;
 my $lc = 0;
 my $last;
+my $sid;
 open(IN, "<$file");
 while(my $line = <IN>){
     next if($line =~ /^\#\#/);
@@ -110,7 +111,9 @@ while(my $line = <IN>){
     if($line =~ /^\#CHROM/){
 	$F[0] =~ s/^\#//;
 	@sids = @F[9..$#F] if($#F > 8);
-	($s) = grep {/$s/} @sids;
+	($sid) = grep {$s eq $_} @sids;
+	($sid) = grep {/$s$/} @sids if(!$sid);
+	($sid) = grep {/^$s/} @sids if(!$sid);
 	next;
     }
 
@@ -135,10 +138,10 @@ while(my $line = <IN>){
 	$v = \%hash;
     }
 
-    next unless($samp{$s}{AD} && @{$samp{$s}{AD}});
+    next unless($samp{$sid}{AD} && @{$samp{$sid}{AD}});
 
-    my $cr = $samp{$s}{AD}[0];
-    my $ca = $samp{$s}{AD}[1];
+    my $cr = $samp{$sid}{AD}[0];
+    my $ca = $samp{$sid}{AD}[1];
     next unless(defined($cr) && defined($ca));
     my $tot = $cr + $ca;
 
@@ -217,7 +220,9 @@ while(my $line = <IN>){
     if($line =~ /^\#/){
 	$F[0] =~ s/^\#//;
 	@sids = @F[9..$#F] if($#F > 8);
-	($s) = grep {/$s/} @sids;
+	($sid) = grep {$s eq $_} @sids;
+	($sid) = grep {/$s$/} @sids if(!$sid);
+	($sid) = grep {/^$s/} @sids if(!$sid);
 	next;
     }
 
@@ -244,9 +249,9 @@ while(my $line = <IN>){
     }
 
     #get MAF and coverage
-    next unless($samp{$s}{AD} && @{$samp{$s}{AD}});
-    my $cr = $samp{$s}{AD}[0];
-    my $ca = $samp{$s}{AD}[1];
+    next unless($samp{$sid}{AD} && @{$samp{$sid}{AD}});
+    my $cr = $samp{$sid}{AD}[0];
+    my $ca = $samp{$sid}{AD}[1];
     next unless(defined($cr) && defined($ca));
     my $tot = $cr + $ca;
     next unless($tot);

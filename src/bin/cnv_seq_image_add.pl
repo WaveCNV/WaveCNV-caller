@@ -1,4 +1,4 @@
-#!/usr/bin/perl
+#!/usr/bin/perl 
 
 #Hack to get around FindBin error where broken Carp is preloaded
 BEGIN {
@@ -84,13 +84,21 @@ if($seg_file){
 	my @att = split(/\;/, $F[8]);
 	my ($cn1) = grep {/^Variant_copy_number=/} @att;
 	$cn1 =~ s/Variant_copy_number=//;
-	$cn1 .= '*' if(grep {$_ eq "is_somatic=1"} @att);
+	#$cn1 .= '*' if(grep {$_ eq "is_somatic=1"} @att);
 	my ($al1) = grep {/^allele=/} @att;
+	my ($rt1) = grep {/^ref_maf_ratio=/} @att;
+	my ($id1) = grep {/^ID=/} @att;
 	if($al1){
 	    $al1 =~ s/allele=//;
 	    $al1 =~ s/\:xeno//;
 	}
-	push(@{$segs{$F[0]}}, [$x1, $x2, $cn1, $al1]);
+	if($rt1){
+	    $rt1 =~ s/ref_maf_ratio=//;
+	}
+	if($id1){
+	    $id1 =~ s/ID=//;
+	}
+	push(@{$segs{$F[0]}}, [$x1, $x2, $cn1, $al1, $rt1, $id1]);
     }
     close(IN);
 }
@@ -108,14 +116,18 @@ while(my $chr = each %segs){
     #write lines for segments
     if($segs{$chr}){
 	foreach my $d (@{$segs{$chr}}){
-	    my ($x1, $x2, $cn1, $al1) = @$d;
+	    my ($x1, $x2, $cn1, $al1, $rt1, $id1) = @$d;
 	    if(abs($x2-$x1)+1 > 10){
 		my $x = int((abs($x2-$x1)+1)/2)-2+$x1;
 		my $y = int(($h-1)/10);
 		$y = 5 if($y < 5);
 		$im1->string(gdSmallFont,$x,$y,"$cn1",$red);
 		$y += 10;
-		$im1->string(gdSmallFont,$x,$y,"$al1",$red) if($al1);
+		#$im1->string(gdSmallFont,$x,$y,"$al1",$red) if($al1);
+		$y += 10;
+		#$im1->string(gdSmallFont,$x,$y,"$rt1",$red) if($rt1);
+		$y += 10;
+		#$im1->string(gdSmallFont,$x,$y,"$id1",$red) if($id1);
 	    }
 	    
 	    foreach my $x ($x1, $x2){

@@ -201,11 +201,27 @@ int coverage_from_pileup_fun (uint32_t tid,
      else {
         for (i=0;i<n;i++) {
      	   if (!pl[i].is_del && !pl[i].is_refskip)
-  	      valid++;
+           valid++;
         }
      }
      bin = (pos-cgp->start)/cgp->width;
-     cgp->bin[bin] += valid;
+
+     if(cgp->width > 1){
+        double bin1 = (pos-cgp->start)/cgp->width;
+        double fac  = 1/cgp->width;
+	double dist = (bin+1)-bin1;
+	if(dist < fac){
+	   fac = dist/fac;
+           cgp->bin[bin] += valid*fac;
+           cgp->bin[bin+1] += valid*(1-fac);
+        }
+	else{
+           cgp->bin[bin] += valid;
+        }
+     }
+     else{
+        cgp->bin[bin] += valid;
+     }
   }
 
   return 0;
@@ -1050,7 +1066,13 @@ CODE:
       cg.reads = 0;
       cg.width = ((double)(end-start))/bins;
       cg.rghash = 0;
-      Newxz(cg.bin,bins+1,int);
+      
+      if((end-start) % bins > 0){
+	 Newxz(cg.bin,bins+1,double);
+      }
+      else{
+         Newxz(cg.bin,bins+1,int);
+      }
 
       flen = av_len(filter) + 1;
       if(flen){
@@ -1082,7 +1104,7 @@ CODE:
       array = newAV();
       av_extend(array,bins);
       for  (i=0;i<bins;i++)
-           av_store(array,i,newSVnv(((float)cg.bin[i])/cg.width));
+           av_store(array,i,newSVnv(((double)cg.bin[i])/cg.width));
       Safefree(cg.bin);
       RETVAL = array;
       sv_2mortal((SV*)RETVAL);  /* this fixes a documented bug in perl typemap */
