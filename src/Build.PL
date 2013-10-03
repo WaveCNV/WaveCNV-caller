@@ -41,8 +41,10 @@ my $build = INSTALL::Build->new(
 	 'Statistics::Regression' => 0,
 	 'Term::ProgressBar' => 0,
 	 'IO::Interactive' => 0,
-	 'File::NFSLock' => '0',
-	 'MLDBM' => '0',
+	 'File::NFSLock' => 0,
+	 'MLDBM' => 0,
+	 'Math::Random' => 0,
+	 'Math::MatrixReal' => 0,
 	 #'Other::Module' => '>= 1.2, != 1.5, < 2.0',
      },
      exe_requires => {
