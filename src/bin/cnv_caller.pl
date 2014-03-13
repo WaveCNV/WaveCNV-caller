@@ -1,4 +1,10 @@
-#!/usr/bin/perl
+#!/usr/bin/perl 
+
+eval 'exec /usr/bin/perl  -S $0 ${1+"$@"}'
+    if 0; # not running under some shell
+
+eval 'exec /usr/bin/perl  -S $0 ${1+"$@"}'
+    if 0; # not running under some shell
 
 #Hack to get around FindBin error where broken Carp is preloaded
 BEGIN {
@@ -51,7 +57,7 @@ use Algorithm::KMeans;
 use constant PI => 4 * atan2(1, 1); #3.14159265358979323846...
 
 our ($sort_exe, $bgzip_exe, $tabix_exe, $vcftools_exe, $hg19, $dummy);
-our ($DUM, %VCF, %BAMS, %RG, %GEN, %CHRS);
+our ($DUM, %VCF, %BAMS, %GEN, %CHRS);
 
 BEGIN {
     eval 'require CNV_caller::ConfigData';
@@ -228,22 +234,8 @@ if(! $OPT{seg_file} || ! $OPT{vcf_file}){
 }
 
 #--validate and prepare command line options
-my $err = validate_options(\%OPT);
-die $err if($err);
-
-#--prepare input files
-print STDERR "#Preparing and indexing input files...\n";
-$OPT{vcf_file}        = prepare_vcf($OPT{vcf_file});
-$OPT{ref}{vcf_file}   = prepare_vcf($OPT{ref}{vcf_file});
-$OPT{xeno}{vcf_file}  = prepare_vcf($OPT{xeno}{vcf_file});
-$OPT{bam_files}       = [prepare_bam(@{$OPT{bam_files}})];
-$OPT{ref}{bam_files}  = [prepare_bam(@{$OPT{ref}{bam_files}})];
-$OPT{xeno}{bam_files} = [prepare_bam(@{$OPT{xeno}{bam_files}})];
-$OPT{fasta}           = prepare_fasta($OPT{fasta});
-$OPT{CHRS}            = get_chr_lengths($OPT{fasta});
-$OPT{GAPS}            = get_chr_gaps($OPT{fasta});
-
-%CHRS = %{$OPT{CHRS}};
+print STDERR "#Validating options and preparing input files...\n";
+validate_options(\%OPT);
 
 #--process stored settings
 $OPT{DB_File} = $OPT{outdir}.'/dbfile';
@@ -268,7 +260,7 @@ if(my $DBOPT = $DB{OPT}){
 		    t_cov);
 
     #rerun of discovery maf and load maf
-    my @check2 = qw(c_frac);
+    my @check2 = qw(cfrac);
     
     #these force complete rerun
     my @check3 = qw(use_xeno
@@ -404,7 +396,7 @@ if($OPT{cell}){
     $OPT{rfrac}  = 1 - $OPT{cfrac};
     $OPT{k_bins} = ceil($OPT{k_bins}/$OPT{cfrac}); #adust for contamintation
     if($OPT{cfrac} <= 0.30){  #MAF becomes less informative
-	$OPT{cn_max} = ($OPT{cfrac} <= 0.15) ? 1 : 3;
+	$OPT{cn_max} = ($OPT{cfrac} <= 0.15) ? 1 : 4;
 	$OPT{models} = get_models($OPT{cn_max}+1);
     }
 
@@ -469,6 +461,8 @@ if($OPT{merge}){
     $files = merge_segments($files, \%OPT);
     $files = smooth_merge_segments($files, \%OPT) if($OPT{smooth});
 }
+
+_reassign_cn($files, \%OPT);
 
 #--now write results to file
 print STDERR "#Writing GVF...\n";
@@ -569,21 +563,53 @@ sub validate_options {
     my $seg_file  = $OPT->{seg_file};
     my $vcf_file  = $OPT->{vcf_file};
     my $rvcf_file = $OPT->{ref}{vcf_file};
+    my $xvcf_file = $OPT->{xeno}{vcf_file};
     my $fasta     = $OPT->{fasta};
+    my $sid = $OPT->{sid};
+    my $rid = $OPT->{ref}{sid};
+    my $xid = $OPT->{xeno}{sid};
+    my $bam_dir = $OPT->{bam_dir};
+    my $rbam_dir = $OPT->{rbam_dir};
+    my $xbam_dir = $OPT->{xbam_dir};
+    my $bam_list = $OPT->{bam_list};
+    my $rbam_list = $OPT->{rbam_list};
+    my $xbam_list = $OPT->{xbam_list};
 
+    #Am I using reference?
+    if($OPT{ref}{sid} || $OPT{ref}{vcf_file} || $rbam_dir || $rbam_list){
+	$OPT{use_ref} = 1;
+	$OPT{use_generic} = 0;
+    }
+    else{
+	$OPT{use_ref} = 0;
+	$OPT{use_generic} = 1;
+    }
+    
+    #Am I using reference?
+    if($xid || $xvcf_file || $xbam_dir || $xbam_list || $OPT->{xcov}){
+	$OPT{use_xeno} = 1;
+    }
+    else{
+	$OPT{use_xeno} = 0;
+    }
+    
+    #check for files
     my $err;
     $err .= "File $seg_file does not exist\n" if(! -f $seg_file);
     $err .= "File $fasta does not exist\n" if(! -f $fasta);
     $err .= "File $vcf_file does not exist\n" if(! -f $vcf_file);
     $err .= "File $rvcf_file does not exist\n" if($rvcf_file && ! -f $rvcf_file);
+    $err .= "File $xvcf_file does not exist\n" if($xvcf_file && ! -f $xvcf_file);
     
+    #fix columns for chromosome, start, and end
     foreach ($OPT->{C}, $OPT->{B}, $OPT->{E}){
 	$_ = int($_-1);
 	$err .= "Column selection must be a positive integer > 1\n" if($_ < 0);
     }
     
+    #check if BAM files exist
     my @bam_files;
-    if(my $bam_dir = $OPT->{bam_dir}){
+    if($bam_dir){
 	if(!-d $bam_dir){
 	    $err .= "Directory $bam_dir does not exist\n" if(! -d $bam_dir);
 	}
@@ -592,7 +618,7 @@ sub validate_options {
 	    $err .= "$bam_dir contained no bam file\n" if(! @bam_files);
 	}
     }
-    if(my $bam_list = $OPT->{bam_list}){
+    if($bam_list){
 	my @blist = split(/\,/, $bam_list);
 	if(@blist){
 	    for(@blist){
@@ -604,8 +630,10 @@ sub validate_options {
 	    $err .= "$bam_list contained no bam file\n" if(! @blist);
 	}
     }
+    
+    #check if reference bam files exist
     my @rbam_files;
-    if(my $rbam_dir = $OPT->{ref}{bam_dir}){
+    if($rbam_dir){
 	if(!-d $rbam_dir){
 	    $err .= "Directory $rbam_dir does not exist\n" if(! -d $rbam_dir);
 	}
@@ -614,7 +642,7 @@ sub validate_options {
 	    $err .= "$rbam_dir contained no bam file\n" if(! @rbam_files);
 	}
     }
-    if(my $rbam_list = $OPT->{ref}{bam_list}){
+    if($rbam_list){
 	my @blist = split(/\,/, $rbam_list);
 	if(@blist){
 	    for(@blist){
@@ -626,8 +654,10 @@ sub validate_options {
 	    $err .= "$rbam_list contained no bam file\n" if(! @blist);
 	}
     }
+    
+    #check if xenograft bam files exist
     my @xbam_files;
-    if(my $xbam_dir = $OPT->{xeno}{bam_dir}){
+    if($xbam_dir){
 	if(!-d $xbam_dir){
 	    $err .= "Directory $xbam_dir does not exist\n" if(! -d $xbam_dir);
 	}
@@ -636,7 +666,7 @@ sub validate_options {
 	    $err .= "$xbam_dir contained no bam file\n" if(! @xbam_files);
 	}
     }
-    if(my $xbam_list = $OPT->{xeno}{bam_list}){
+    if($xbam_list){
 	my @blist = split(/\,/, $xbam_list);
 	if(@blist){
 	    for(@blist){
@@ -648,39 +678,123 @@ sub validate_options {
 	    $err .= "$xbam_list contained no bam file\n" if(! @blist);
 	}
     }
-
+    
+    return $err if($err);
+    
+    #--prepare FASTA related values
+    prepare_fasta($fasta);
+    $OPT->{CHRS} = get_chr_lengths($fasta);
+    $OPT->{GAPS} = get_chr_gaps($fasta);
+    %CHRS = %{$OPT->{CHRS}};
+    
+    prepare_vcf($vcf_file);
+    
+    #validate sample ID
+    if($vcf_file){
+	my $vcf = $VCF{$vcf_file};
+	if(!$sid){    
+	    die "ERROR: VCF contains multiple samples and you failed to specify a sample ID\n"
+		if(@{[$vcf->get_samples()]} > 1);
+	    ($sid) = $vcf->get_samples();
+	}
+	($sid) = grep {/$sid$/} $vcf->get_samples();
+    }
+    
+    #set reference and xenograft vcf if appropriate
+    if($rid && !$rvcf_file){
+	my $vcf = $VCF{$vcf_file};
+	if(grep {/$rid$/} $vcf->get_samples()){
+	    $rvcf_file = $vcf_file;
+	}
+	else{
+	    warn "WARNING: You have supplied a sample ID for the reference but no VCF is associated\n";
+	}
+    }
+    if($xid && !$xvcf_file){
+	my $vcf = $VCF{$vcf_file};
+        if(grep {/$xid$/} $vcf->get_samples()){
+	    $xvcf_file = $vcf_file;
+        }
+	else{
+	    warn "WARNING: You have supplied a sample ID for the xenograft but no VCF is associated\n";
+	}
+    }
+    prepare_vcf($rvcf_file);
+    prepare_vcf($xvcf_file);
+    
+    #validate reference ID
+    if($rvcf_file){
+	my $rvcf = $VCF{$rvcf_file};
+	if(!$rid){
+	    die "ERROR: Reference VCF contains multiple samples and you failed to specify a sample ID\n"
+		if(@{[$rvcf->get_samples()]} > 1);
+	    ($rid) = $rvcf->get_samples();
+	}
+	($rid) = grep {/$rid$/} $rvcf->get_samples();;
+    }
+    
+    #validate xenograft ID
+    if($xvcf_file){
+	my $xvcf = $VCF{$xvcf_file};
+	if(!$xid){
+	    die "ERROR: Xenograft VCF contains multiple samples and you failed to specify a sample ID\n"
+		if(@{[$xvcf->get_samples()]} > 1);
+	    ($xid) = $xvcf->get_samples();
+	}
+	($xid) = grep {/$xid$/} $xvcf->get_samples();;
+    }
+    
+    #load BAM files
+    prepare_bam(@bam_files);
+    
+    #set reference and xenograft BAM files if appropriate
+    if($OPT->{use_ref} && !$rbam_dir && !$rbam_list && @bam_files){
+	if(grep {$_ eq $rid} map {keys %{$_->{_samples}}}  @{$BAMS{_files}}{@bam_files}){ #check id
+	    @rbam_files = @bam_files;
+	}
+	else{
+	    warn "WARNING: You have supplied bamfiles for you sample but not your reference\n";
+	}
+    }
+    if($OPT->{use_xeno} && !$xbam_dir && !$xbam_list && @bam_files){
+	if(grep {$_ eq $xid} map {keys %{$_->{_samples}}}  @{$BAMS{_files}}{@bam_files}){ #check id
+            @xbam_files = @bam_files;
+	}
+	else{
+	    warn "WARNING: You have supplied bamfiles for you sample but not your xenograft\n";
+	}
+    }
+    
+    prepare_bam(@rbam_files);
+    prepare_bam(@xbam_files);
+    
     my ($base) = $seg_file =~ /([^\/]+)$/;
     my $outdir = Cwd::cwd()."/$base.cnv.output";
     mkdir($outdir);
-
+    
     #fix dependent values
-    $OPT->{bam_files}  = \@bam_files;
+    $OPT->{fasta} = $fasta;
+    $OPT->{sid} = $sid;
+    $OPT->{ref}{sid} = $rid;
+    $OPT->{xeno}{sid} = $xid;
+    $OPT->{vcf_file} = $vcf_file;
+    $OPT->{ref}{vcf_file} = $rvcf_file;
+    $OPT->{xeno}{vcf_file} = $xvcf_file;
+    $OPT->{bam_files} = \@bam_files;
     $OPT->{ref}{bam_files} = \@rbam_files;
     $OPT->{xeno}{bam_files} = \@xbam_files;
-    $OPT->{use_xeno}   = 1 if($OPT->{xcov});
-    $OPT->{merge}      = 1 if($OPT->{smooth}); #implies merge
     $OPT->{outdir} = $outdir;
-    $OPT->{base}   = $base;
-
+    $OPT->{base} = $base;
+    $OPT->{merge} = 1 if($OPT->{smooth}); #implies merge
+    
     #adust for contamintation
     if($OPT->{cfrac} < 1){
-	$OPT->{cell}   = 1;
+	$OPT->{cell} = 1;
 	$OPT->{k_bins} = ceil($OPT->{k_bins}/$OPT->{cfrac});
-	$OPT->{cn_max}   = ($OPT->{cfrac} <= 0.25) ? 4 : 5;
-	$OPT->{models}   = get_models($OPT->{cn_max}+1);
+	$OPT->{cn_max} = ($OPT->{cfrac} <= 0.25) ? 4 : 5;
+	$OPT->{models} = get_models($OPT->{cn_max}+1);
     }
-
-
-    if($OPT{ref}{sid} || $OPT{ref}{vcf_file}){
-	$OPT{use_ref} = 1;
-    }
-    else{
-	$OPT{use_generic} = 1;
-    }
-    if($OPT{xeno}{sid} || $OPT{xeno}{vcf_file}){
-	$OPT{use_xeno} = 1;
-    }
-
+    
     return $err;
 }
 
@@ -692,7 +806,7 @@ sub prepare_fasta {
 	next if(!$fasta);
 
 	my $bf = $dummy;
-	my $sam = Bio::DB::Sam->new(-bam  => $bf,
+	my $bam = Bio::DB::Sam->new(-bam  => $bf,
 				    -autoindex => 1,
 				    -fasta=> $fasta);
     }
@@ -702,13 +816,40 @@ sub prepare_fasta {
 
 #indexes the bam files
 sub prepare_bam {
-    my @bam_files = @_;
+    my @bam_files = (@_);
 
     foreach my $f (@bam_files){
-	next if(!$f);
+	my $bam = $BAMS{_files}{$f} || Bio::DB::Sam->new(-bam  => $f,
+							 -autoindex => 1,
+							 -fasta=> $OPT{fasta});
+	#get read groups for filtering
+	if(!$bam->{_samples}){
+	    my @headers = grep {/^\@RG\t/} split(/\n/, $bam->header->text);
+	    foreach my $h (@headers){
+		my %rg;
+		foreach (grep {/^(ID:.*|SM:.*)$/} split(/\t/, $h)){
+		    my @F = split(/\:/, $_);
+		    $rg{$F[0]} = join(':', @F[1..$#F]);
+		}
+		next unless(keys(%rg) == 2);
+		push(@{$bam->{_samples}{$rg{SM}}}, $rg{ID});
+	    }
+	}
 
-	Bio::DB::Sam->new(-bam  => $f,
-			  -autoindex => 1);
+	if(@bam_files == 1){
+	    $BAMS{_files}{$f} = $bam;
+	    foreach my $sid (keys %{$bam->{_samples}}){
+		$BAMS{$sid}{$_} = $bam foreach(keys %CHRS);
+	    }
+	}
+	else{
+	    next unless($f =~ /\.(chr[\dXY]+)\./ && $CHRS{$1});
+	    $BAMS{_files}{$f} = $bam;
+	    foreach my $sid (keys %{$bam->{_samples}}){
+		$BAMS{$sid}{$1} = $bam;
+	    }
+	}
+
     }
 
     return (wantarray) ? @bam_files : shift @bam_files;
@@ -720,13 +861,14 @@ sub prepare_vcf {
 
     foreach my $vcf_file (@vcf_files){
 	next if(!$vcf_file);
+	next if($VCF{$vcf_file});
 
 	my $bgzfile = ($vcf_file =~ /\.gz$/) ? $vcf_file : "$vcf_file.gz";
+	next if($VCF{$bgzfile});
 	if(! -f "$bgzfile"){
 	    open(my $OUT, "> $bgzfile.tmp");
 	    open(my $IN, "< $vcf_file");
-	    my $spid = open3(my $SORT, my $SORTED, '>&STDERR',
-			     "$sort_exe -k1,1 -k2,2n");
+	    my $spid = open3(my $SORT, my $SORTED, '>&STDERR', "$sort_exe -k1,1 -k2,2n");
 	    my $bpid = open3(my $BGZ, ">&".fileno($OUT), '>&STDERR', "$bgzip_exe -c");
 	    
 	    while(my $line = <$IN>){
@@ -763,7 +905,9 @@ sub prepare_vcf {
 	    die "ERROR: Tabix failed with exit status $tstat\n" if($tstat);
 	}
 
-	$vcf_file = $bgzfile; #replace with new location
+        my $vcf = $VCF{$vcf_file} || $VCF{$bgzfile} || Vcf->new(file=>"$bgzfile");
+        $vcf->parse_header();
+        $VCF{$vcf_file} = $VCF{$bgzfile} = $vcf;
     }
 
     return (wantarray) ? @vcf_files : shift @vcf_files;
@@ -936,10 +1080,9 @@ sub _estimate_xeno_thread {
     my $sid = $OPT->{sid};
 
     #load VCF files to get expected densities
-    my $vcf = Vcf->new(file=>"$vcf_file");
-    $vcf->parse_header();
-    my ($SID) = grep {/$sid$/} $vcf->get_samples();
-    $vcf->set_samples(include=>[$SID]);
+    prepare_vcf($vcf_file);
+    my $vcf = $VCF{$vcf_file};
+    $vcf->set_samples(include=>[$sid]);
     
     my %list;
     while((my $chr = shift @$work) || $$flag){
@@ -950,9 +1093,9 @@ sub _estimate_xeno_thread {
 	while(my $v = $vcf->next_data_hash()){
 	    my $pos = $v->{POS};
 	    next unless($marker->{$chr}{$pos});
-	    next unless($v->{gtypes}{$SID}{AD});
+	    next unless($v->{gtypes}{$sid}{AD});
 	    
-	    my ($rc, $ac) = split(/,/, $v->{gtypes}{$SID}{AD});
+	    my ($rc, $ac) = split(/,/, $v->{gtypes}{$sid}{AD});
 	    next if(!$ac);
 	    $list{$ac}++;
 	}
@@ -1371,7 +1514,7 @@ sub make_seg_hash {
     $res->{is_generic} = 1 if($OPT->{is_generic});
     $res->{is_ref} = 1 if($OPT->{is_ref});
 
-    if($OPT->{use_xeno} && ($OPT->{xeno}{vcf_file} || $OPT->{xeno}{sid})){
+    if($OPT->{use_xeno}){
         #need xenograft model
         $res->{xeno} = { chr        => $chr,
 			 start      => $start,
@@ -1410,58 +1553,37 @@ sub add_vcf_data {
     my $thr        = $OPT->{maf_tail_filt};
 
     #load VCF file
-    my $vcf;
-    if($VCF{$vcf_file}){
-	$vcf = $VCF{$vcf_file};
-    }
-    else{
-	$vcf = Vcf->new(file=>"$vcf_file");
-	$vcf->parse_header();
-	$VCF{$vcf_file} = $vcf;
-    }
+    prepare_vcf($vcf_file);
+    my $vcf = $VCF{$vcf_file};
 
-    my ($SID) = grep {/$sid$/} $vcf->get_samples() if($sid);
-    $vcf->set_samples(include=>[$SID]) if($sid);
+    $vcf->set_samples(include=>[$sid]);
    
     #load reference VCF
     my $rvcf;
-    my $RID;
-    if($rvcf_file && $rvcf_file ne $vcf_file){
-	if($VCF{$rvcf_file}){
+    if($OPT->{use_ref}){
+	if($rvcf_file && $rvcf_file ne $vcf_file){
+	    prepare_vcf($rvcf_file);
 	    $rvcf = $VCF{$rvcf_file};
+	    $rvcf->set_samples(include=>[$rid]);
 	}
 	else{
-	    $rvcf = Vcf->new(file=>"$rvcf_file");
-	    $rvcf->parse_header();
-	    $VCF{$rvcf_file} = $rvcf;
+	    $vcf->set_samples(include=>[$sid, $rid]);
 	}
-	($RID) = grep {/$rid$/} $rvcf->get_samples() if($rid);
-	$rvcf->set_samples(include=>[$RID]) if($rid);
-    }
-    elsif($rid){
-	($RID) = grep {/$rid$/} $vcf->get_samples();
-	$vcf->set_samples(include=>[$SID, $RID]);
     }
 
     #load xeno VCF
     my $xvcf;
-    my $XID;
-    if($xvcf_file && $xvcf_file ne $vcf_file){
-	if($VCF{$xvcf_file}){
+    if($OPT->{use_xeno}){
+	if($xvcf_file && $xvcf_file ne $vcf_file){
+	    prepare_vcf($xvcf_file);
 	    $xvcf = $VCF{$xvcf_file};
+	    $xvcf->set_samples(include=>[$xid]);
 	}
 	else{
-	    $xvcf = Vcf->new(file=>"$xvcf_file");
-	    $xvcf->parse_header();
-	    $VCF{$xvcf_file} = $xvcf;
+	    my @ids = ($sid, $xid);
+	    push(@ids, $rid) if($OPT->{use_ref} && !$rvcf);
+	    $vcf->set_samples(include=>[@ids]);
 	}
-	($XID) = grep {/$xid$/} $xvcf->get_samples() if($xid);
-	$xvcf->set_samples(include=>[$XID]) if($xid);
-    }
-    elsif($xid){
-	($XID) = grep {/$xid$/} $vcf->get_samples();
-	my @ids = grep {$_} ($SID, $RID, $XID);
-	$vcf->set_samples(include=>[@ids]);
     }
 
     #get observed MAF and VCF coverage for segment
@@ -1482,11 +1604,11 @@ sub add_vcf_data {
     #calculate first for separate reference VCF
     my %ref_ok;
     my ($chr, $start, $end) = ($res->{chr}, $res->{start}, $res->{end});
-    if($rvcf && $OPT->{use_ref}){
+    if($rvcf){
 	$rvcf->open(region=> "$chr:$start-$end");
 	while(my $v = $rvcf->next_data_hash()){
 	    my $pos = $v->{POS};
-	    my $rAD = ($RID) ? $v->{gtypes}{$RID}{AD} : $v->{gtypes}{AD};
+	    my $rAD = $v->{gtypes}{$rid}{AD};
 	    if($rAD && $rAD ne '.'){
 		my ($rc, $ac) = split(/,/, $rAD);
 		my $cov = $rc+$ac;
@@ -1512,8 +1634,8 @@ sub add_vcf_data {
 	my $pos = $v->{POS};
 
 	#always calculate  reference first if merged in same VCF
-	if($OPT->{use_ref} && $RID && !$rvcf){
-	    my $rAD = $v->{gtypes}{$RID}{AD};
+	if($OPT->{use_ref} && !$rvcf){
+	    my $rAD = $v->{gtypes}{$rid}{AD};
 	    if($rAD && $rAD ne '.'){
 		my ($rc, $ac) = split(/,/, $rAD);
 		my $cov = $rc+$ac;
@@ -1532,7 +1654,7 @@ sub add_vcf_data {
 	}
 
 	#calculate for sample
-	my $sAD = ($SID) ? $v->{gtypes}{$SID}{AD} : $v->{gtypes}{AD};
+	my $sAD = $v->{gtypes}{$sid}{AD};
 	if($sAD && $sAD ne '.'){
 	    my ($rc, $ac) = split(/,/, $sAD);
 	    my $cov = $rc+$ac;
@@ -1549,8 +1671,8 @@ sub add_vcf_data {
 	}
 
 	#calculate when xeno is merged with sample VCF
-	if($res->{use_xeno} && $XID && !$xvcf){
-	    my $xAD = $v->{gtypes}{$XID}{AD};
+	if($res->{use_xeno} && !$xvcf){
+	    my $xAD = $v->{gtypes}{$xid}{AD};
 	    if($xAD && $xAD ne '.'){
 		my ($rc, $ac) = split(/,/, $xAD);
 		my $cov = $rc+$ac;
@@ -1569,10 +1691,10 @@ sub add_vcf_data {
     }
 
     #calculate for separate xeno VCF
-    if($xvcf && $OPT->{use_xeno}){
+    if($xvcf){
 	$xvcf->open(region=> "$chr:$start-$end");
 	while(my $v = $xvcf->next_data_hash()){
-	    my $xAD = ($XID) ? $v->{gtypes}{$XID}{AD} : $v->{gtypes}{AD};
+	    my $xAD = $v->{gtypes}{$xid}{AD};
 	    if($xAD && $xAD ne '.'){
 		my ($rc, $ac) = split(/,/, $xAD);
 		my $cov = $rc+$ac;
@@ -1964,8 +2086,9 @@ sub _maf_point {
             $C{sum} += binomial_cmf($x, $cov, $t)*$wi{$p[$i]};
         }
         $CUT{$thr}{$pstring}{$cov} = $C{sum};
+	
     }
-    my $cut = $CUT{$thr}{$pstring}{$cov};
+    my $cut = $CUT{$thr}{$pstring}{$cov} || 0;
 
     #normalize for threshold and basement
     my $L = $L{sum}/(1-$cut);
@@ -2109,13 +2232,13 @@ sub _mark_best_alleles {
 
 	#best in cn category
 	$cns{$cn} ||= [$m, $sc];
-	my $cmp = $L <=> $cns{$cn}[1]{L} || $cns{$cn}[1]{rss} <=> $rss;
+	my $cmp = ($L <=> $cns{$cn}[1]{L} || $cns{$cn}[1]{rss} <=> $rss);
 	$cns{$cn} = [$m, $sc] if($cmp == 1);
 	 
 	#best overall
 	if($cn <= $cn_max && ($m ne '0:0' || $rfrac < $thr)){
 	    $best ||= [$m, $sc];
-	    my $cmp = $L <=> $best->[1]{L} || $best->[1]{rss} <=> $rss;
+	    my $cmp = ($L <=> $best->[1]{L} || $best->[1]{rss} <=> $rss);
 	    $best = [$m, $sc] if($cmp == 1);
 	}
 
@@ -2164,59 +2287,23 @@ sub add_bam_cov{
     }
 
     #load BAM files
-    my $tag = $OPT->{bam_files}[0];
-    if(! keys %{$BAMS{$tag}}){
-	if(@$bam_files == 1){
-	    foreach my $chr (keys %CHRS){
-		$BAMS{$tag}{$chr} = $bam_files->[0];
-	    }
-	}
-	else{
-	    foreach my $f (@$bam_files){
-		next unless($f =~ /\.(chr[\dXY]+)\./ && $CHRS{$1});
-		$BAMS{$tag}{$1} = $f;
-	    }
-	}
-	foreach my $chr (keys %CHRS){
-	    next if(!$BAMS{$tag}{$chr});
-	    $BAMS{$tag}{$chr} = Bio::DB::Sam->new(-bam  => $BAMS{$tag}{$chr},
-						  -autoindex => 1,
-						  -fasta=> $OPT->{fasta});
-	}
-    }
-
+    my $sid = $OPT->{sid};
     my ($chr, $start, $end) = ($r->{chr}, $r->{start}, $r->{end});
+    prepare_bam(@$bam_files);
     
-    my $bam = $BAMS{$tag}{$chr};
+    my $bam = $BAMS{$sid}{$chr};
     die "ERROR: There is no bam file for $chr.\n" if(!$bam);
     my $segment = $bam->segment($chr,$start, $end);
-
-    #process BAM files
-    my $sid = $OPT->{sid};
-    if($sid && !$RG{$tag}{$chr}){ #get read groups for filtering
-	my @headers = grep {/^\@RG\t/} split(/\n/, $bam->header->text);
-	foreach my $h (@headers){
-	    my %rgs;
-	    foreach (grep {/^(ID:.*|SM:.*)$/} split(/\t/, $h)){
-		my @F = split(/\:/, $_);
-		$rgs{$F[0]} = join(':', @F[1..$#F]);
-	    }
-	    next unless( keys(%rgs) == 2);
-	    push(@{$RG{$tag}{$chr}{$rgs{SM}}}, $rgs{ID});
-	}
-	$RG{$tag}{$chr} ||= {};
-    }
     
     #get coverage from BAM
     my $cov_list;
-    if(!$sid || !keys %{$RG{$tag}{$chr}}){
+    if(keys %{$bam->{_samples}} == 1){
 	my ($obj) = $segment->features(-type => 'coverage');
 	$cov_list = $obj->coverage();
     }
     else{
-	my ($SID) = grep {/$sid$/} keys %{$RG{$tag}{$chr}};
 	my ($obj) = $segment->features(-type => 'coverage',
-				       -filter => $RG{$tag}{$chr}{$SID});
+				       -filter => $bam->{_samples}{$sid});
 	$cov_list = $obj->coverage();
     }
     $cov_list ||= [];
@@ -2457,6 +2544,7 @@ sub view {
         @norm = @norm2;
     }
 
+    print STDERR "\n";
     for(my $i = 0; $i < @norm; $i++){
 	print STDERR "$i";
 	print STDERR '*'x(int($norm[$i]*10*@norm));
@@ -2491,51 +2579,18 @@ sub view2 {
     my ($chrnum) = $chr =~ /(\d+)$/;
 
     #load VCF file
-    my $vcf;
     my $vcf_file  = $OPT->{vcf_file};
-    if($VCF{$vcf_file}){
-        $vcf = $VCF{$vcf_file};
-    }
-    else{
-        $vcf = Vcf->new(file=>"$vcf_file");
-        $vcf->parse_header();
-        $VCF{$vcf_file} = $vcf;
-    }
-    my ($SID) = grep {/$sid$/} $vcf->get_samples() if($sid);
-    $vcf->set_samples(include=>[$SID]) if($sid);
+    prepare_vcf($vcf_file);
+    my $vcf = $VCF{$vcf_file};
+    $vcf->set_samples(include=>[$sid]);
 
     #load BAM files
     my $bam_files = $OPT->{bam_files};
-    my $btag = $OPT->{bam_files}[0];
-    if(! keys %BAMS){
-	if(@$bam_files == 1){
-            foreach my $chr (keys %CHRS){
-                $BAMS{$btag}{$chr} = $bam_files->[0];
-            }
-        }
-        elsif(@$bam_files){
-            foreach my $f (@$bam_files){
-                next unless($f =~ /\.(chr[\dXY]+)\./ && $CHRS{$1});
-                $BAMS{$btag}{$1} = $f;
-            }
-        }
-        else{
-            foreach my $chr (keys %CHRS){
-                $BAMS{$btag}{$chr} = $dummy;
-            }
-        }
-        foreach my $chr (keys %CHRS){
-            next if(!$BAMS{$btag}{$chr});
-            $BAMS{$btag}{$chr} = Bio::DB::Sam->new(-bam  => $BAMS{$btag}{$chr},
-                                            -autoindex => 1,
-                                            -fasta=> $OPT->{fasta});
-        }
-    }
+    prepare_bam(@$bam_files);
 
     #temp (used to remove xenograft datapoints)
     my $rid = $OPT->{ref}{sid};
-    my ($RID) = grep {/$rid$/} $vcf->get_samples() if($rid);
-    $vcf->set_samples(include=>[$SID, $RID]) if($sid && $rid);
+    $vcf->set_samples(include=>[$sid, $rid]);
 
     #get MAF from VCF
     my %vcf_data = (chr => [],
@@ -2546,19 +2601,17 @@ sub view2 {
                     cov => []);
     $vcf->open(region=> "$chr:$cs-$ce");
     while(my $v = $vcf->next_data_hash()){
-        my $sAD = ($SID) ? $v->{gtypes}{$SID}{AD} : $v->{gtypes}{AD};
+        my $sAD = $v->{gtypes}{$sid}{AD};
 
         #temp (used to remove xenograft datapoints)
-        my $rAD = $v->{gtypes}{$RID}{AD} if($RID);
+        my $rAD = $v->{gtypes}{$rid}{AD};
 	my $rcov;
         my $rmaf = ($OPT->{use_ref}) ? 0 : 1;
-        if($RID){
-            next unless($rAD && $rAD ne '.');
-            my ($rc, $ac) = split(/,/, $rAD);
-            $rcov = $rc+$ac;
-            next unless($rcov >= $OPT->{maf_cov_filt});
-            $rmaf = $ac/$rcov;
-        }
+	next unless($rAD && $rAD ne '.');
+	my ($rc, $ac) = split(/,/, $rAD);
+	$rcov = $rc+$ac;
+	next unless($rcov >= $OPT->{maf_cov_filt});
+	$rmaf = $ac/$rcov;
 
         if($sAD && $sAD ne '.'){
             my ($rc, $ac) = split(/,/, $sAD);
@@ -2606,36 +2659,20 @@ sub view2 {
                     pos => [],
                     cov => []);
     if(@$bam_files){
-        my $sam = $BAMS{$btag}{$chr};
-        my $segment = $sam->segment($chr,$cs, $ce);
-
-        #get BAM sample ID andf read groups
-        if($sid && !$RG{$btag}{$chr}){ #get read groups for filtering
-            my @headers = grep {/^\@RG\t/} split(/\n/, $sam->header->text);
-            foreach my $h (@headers){
-                my %tags;
-                foreach (grep {/^(ID:.*|SM:.*)$/} split(/\t/, $h)){
-                    my @F = split(/\:/, $_);
-                    $tags{$F[0]} = join(':', @F[1..$#F]);
-                }
-                next unless( keys(%tags) == 2);
-                push(@{$RG{$btag}{$chr}{$tags{SM}}}, $tags{ID});
-            }
-            $RG{$btag}{$chr} ||= {};
-        }
+        my $bam = $BAMS{$sid}{$chr};
+        my $segment = $bam->segment($chr,$cs, $ce);
 
         #binned coverage (easier to see on plot)
         my $cov_list;
 	my $bins = $length + 2*$pad;
 	$bins = 5000 if($bins > 5000);
-        if(!$sid || !keys %{$RG{$btag}{$chr}}){
+        if(keys %{$bam->{_samples}} == 1){
             my ($obj) = $segment->features(-type => "coverage:$bins");
             $cov_list = $obj->coverage();
         }
         else{
-            my ($SID) = grep {/$sid$/} keys %{$RG{$btag}{$chr}};
             my ($obj) = $segment->features(-type => "coverage:$bins",
-					   -filter => $RG{$btag}{$chr}{$SID});
+					   -filter => $bam->{_samples}{$sid});
             $cov_list = $obj->coverage();
         }
         $cov_list ||= [];
@@ -2669,7 +2706,7 @@ sub view2 {
     unlink($tfile);
 
     #create image plot
-    my $pdf = "$SID\_$chr\_$start\-$end\_padding\_$pad.pdf";
+    my $pdf = "$sid\_$chr\_$start\-$end\_padding\_$pad.pdf";
     $R->run(qq`pdf("$pdf",width=9,height=7.5,onefile=TRUE,paper='letter',pointsize=12)`);
     if(@$bam_files){
         #inject BAM data
@@ -2795,6 +2832,7 @@ sub expected_segment_coverage{
 	my $step = ($max-$min)/100;
 	
 	#identify kernel peak
+	print STDERR "\n";
 	my $sum = 0;
 	$peak = [0,0]; #expected segment median coverage
 	for(my $x = $min; $x <= $max; $x += $step) {
@@ -2810,15 +2848,19 @@ sub expected_segment_coverage{
     if(!$t_cov || !$rt_cov){
 	#select segments matching peak
 	my @select;
-	my ($min, $max) = ($peak-$peak/8, $peak+$peak/8);
-	foreach my $r (@$res){
-	    my $t = $r->{cov_median};
-	    if($r->{xeno} && $OPT->{xeno}{ccor_f}){
-		#at very low coverage mean is more informative
-		$t -= $r->{xeno}{cov_mean}/$OPT->{xeno}{ccor_f};
+	my $pad = 8;
+	while(!@select && @$res){
+	    my ($min, $max) = ($peak-$peak/$pad, $peak+$peak/$pad);
+	    foreach my $r (@$res){
+		my $t = $r->{cov_median};
+		if($r->{xeno} && $OPT->{xeno}{ccor_f}){
+		    #at very low coverage mean is more informative
+		    $t -= $r->{xeno}{cov_mean}/$OPT->{xeno}{ccor_f};
+		}
+		$t /= $r->{ref}{ccor_f}; #correction improves resolution
+		push(@select, $r) if($min <= $t && $t <= $max);
 	    }
-	    $t /= $r->{ref}{ccor_f}; #correction improves resolution
-	    push(@select, $r) if($min <= $t && $t <= $max);
+	    $pad /= 2;
 	}
 
 	#make target for sample and reference be average from same regions
@@ -3024,19 +3066,23 @@ sub label_somatic {
     if($OPT->{base_cov} > 5 && $OPT->{ref}{base_cov}){
 	return if($OPT->{ploidy} - $cn == $OPT->{ref}{ploidy} - $rcn); 
 	return if($cn == $rcn);
+	return if($cn == $r->{ucor}{cn});
 	return if($cn == $OPT->{ploidy});
 	return if($cn == $OPT->{ref}{ploidy});
+	my @v = sort {$a <=> $b} ($r->{ucor}{cn}, $OPT->{ploidy}, $r->{ccor}{cn});
+	return if($v[1] == $OPT->{ploidy});
+	@v = sort {$a <=> $b} ($r->{ucor}{cn}, $OPT->{ref}{ploidy}, $r->{ccor}{cn});
+	return if($v[1] == $OPT->{ref}{ploidy});
     }
-    
-    #must be significantly different from ploidy levels
-    return if(!sig_somatic($r, $OPT));
-    
     # if just labeling loss and gain
-    if($OPT->{base_cov} <= 5 && $r->{ref} && sig_somatic($r->{ref}, ref_param($OPT))){
+    elsif($OPT->{base_cov} <= 5 && $r->{ref} && sig_somatic($r->{ref}, ref_param($OPT))){
 	return if($r->{final}{cn} < $OPT->{ploidy} && $r->{ref}{cn} < $OPT->{ref}{ploidy});
 	return if($r->{final}{cn} > $OPT->{ploidy} && $r->{ref}{cn} > $OPT->{ref}{ploidy});
     }
     
+    #must be significantly different from ploidy levels
+    return if(!sig_somatic($r, $OPT));
+
     #only label segements that don't have alternate explanations as somatic
     $r->{is_somatic} = 1;
 }
@@ -3295,6 +3341,20 @@ sub _merge_thread {
     }
 
     return @files;
+}
+
+#reassigns CN (really just for debugging)
+sub _reassign_cn {
+    my $work = shift; #reference to shared list
+    my $OPT   = shift;
+    
+    foreach my $file (@$work){
+        my $nostore = ref($file);
+        my $res = ($nostore) ? $file : Storable::retrieve($file);
+        @$res = sort {$a->{start} <=> $b->{start}} @$res;
+	assign_cn($_, $OPT) foreach(@$res);
+	Storable::store($res, $file);
+    }
 }
 
 #merge action performed by each thread
@@ -3738,6 +3798,9 @@ sub _merge_same_cn {
 	    $match = 0;
 	}
 	elsif($act->{final}{cn} eq $r0->{final}{cn} && _alleles_match($act, $r0, $OPT)){
+	    $match = 1;
+	}
+	elsif($act->{ucor}{cn} eq $r0->{ucor}{cn} && _alleles_match($act, $r0, $OPT)){
 	    $match = 1;
 	}
 
@@ -4795,7 +4858,7 @@ sub assign_cn {
 
     my $ucn = best_cn($r, 0, $bc, $OPT);
     my $cn  = ($r->{ccor_f}) ? best_cn($r, 0, $bc*$r->{ccor_f}, $OPT) : $ucn;
-    my $fin = $cn;
+    my ($fin) = sort {$b->{rL} <=> $a->{rL} || $b->{L} <=> $a->{L}} ($cn, $ucn);
     $fin = $ucn if(!$r->{ref}); #temp
     if($r->{ref}){
 	my $loi = {L => 0,
@@ -4948,7 +5011,7 @@ sub estimate_copy_fraction {
     my $cker = Statistics::KernelEstimation->new(); #for coverage
     foreach my $r (@$res){
         #ignore if reference is not as expected
-        next if($r->{ref}{maf_target} < 0.48 || $r->{ref}{maf_target} > 0.52);
+        next if($r->{ref}{maf_target} < 0.46 || $r->{ref}{maf_target} > 0.54);
         #sample is closer than ref
         next if(abs(0.5-$r->{maf_target}) < abs(0.5-$r->{ref}{maf_target}));
 
@@ -4981,8 +5044,8 @@ sub estimate_copy_fraction {
     my $rpeaks = find_peaks(\@rdis, 10);
     my $speaks = find_peaks(\@sdis, 10);
     my $fpeaks = find_peaks(\@fdis, 10);
-    
-    #filter all peaks
+
+    #filter all MAF peaks
     my @rpeaks = sort {$a <=> $b} grep {$rpeaks->{$_} == 1} keys %$rpeaks;
     my @speaks = sort {$a <=> $b} grep {$speaks->{$_} == 1} keys %$speaks;
     my @fpeaks = sort {$a <=> $b} grep {$fpeaks->{$_} == 1} keys %$fpeaks;
@@ -4990,7 +5053,20 @@ sub estimate_copy_fraction {
     my ($stop) = sort {$sdis[$b] <=> $sdis[$a]} @speaks;
     @rpeaks = grep {$rdis[$_] >= 0.1*$rdis[$rtop]} @rpeaks; #ignore very small peaks
     @speaks = grep {$sdis[$_] >= 0.1*$sdis[$stop]} @fpeaks; #filtered fpeaks using sdis
+
+    #get global peaks of coverage
+    my @cdis;
+    ($min, $max) = (0, $cker->range()+10);
+    for(my $x = $min; $x <= $max; $x++) {
+        push(@cdis, $cker->pdf($x, 1));
+    }
+    my $cpeaks = find_peaks(\@cdis, 10);
     
+    #filter coverage peaks
+    my @cpeaks = sort {$a <=> $b} grep {$cpeaks->{$_} == 1} keys %$cpeaks;
+    my ($ctop) = sort {$cdis[$b] <=> $cdis[$a]} @cpeaks;
+    @cpeaks = grep {$cdis[$_] >= 0.1*$cdis[$ctop]} @cpeaks; #ignore very small peaks    
+
     if(!@speaks){
     	@speaks = grep {$sdis[$_] >= 0.05*$sdis[$stop]} @fpeaks;
     	return (0, 0) if(!@speaks);
@@ -5009,7 +5085,7 @@ sub estimate_copy_fraction {
     }
 
     #cluster by MAF and coverage
-    if($OPT->{exome} || @speaks <= 2){ #base primarilly on MAF if exome (too much coverage variance)
+    if($OPT->{exome} || (@speaks <= 2 && @cpeaks == 1)){ #base primarilly on MAF if exome (too much coverage variance)
 	#build convenient cluster hash (center of cluster is peak's mean MAF and coverage)
 	foreach my $c (@clusters){
 	    my $maf_ave;
@@ -5042,16 +5118,8 @@ sub estimate_copy_fraction {
 	}
 	$maf_var /= @select;
 
-	#get coverage peaks
-	my @cdis;
-	my ($min, $max) = (0, $cker->range()+10);
-	for(my $x = $min; $x <= $max; $x += ($max-$min)/500) {
-	    push(@cdis, $cker->pdf($x, 1));
-	}
-	my $cpeaks = find_peaks(\@cdis, 10);
-	
 	#precluster on coverage to normalize in that axis
-	@divs = map {$_*($max-$min)/500} sort {$a <=> $b} grep {$cpeaks->{$_} == -1} keys %$cpeaks;
+	@divs = sort {$a <=> $b} grep {$cpeaks->{$_} == -1} keys %$cpeaks;
 	shift @divs; #all results are always past first cutoff extreme
 	$pos = 0;
 	undef @clusters;
@@ -5120,10 +5188,11 @@ sub estimate_copy_fraction {
 	#my ($ids, $centers) = $em->EM();
 
 	#--do k-means clustering to identify peaks
+	my $Kmin = (scalar(@fpeaks) > 1) ? scalar(@fpeaks) : scalar(@cpeaks); #at least as many peaks as the kernel
 	my $kmeans = Algorithm::KMeans->new(datafile        => $tfile,
 					    mask            => 'N11', #ignore coverage for exome
 					    K               => 0, #discoverable
-					    Kmin            => scalar(@fpeaks), #at least as many peaks as the kernel
+					    Kmin            => $Kmin,
 					    cluster_seeding => 'smart',
 					    terminal_output => 0,
 					    debug           => 0);
@@ -5298,39 +5367,23 @@ sub _discovery_segments_thread {
     my $thr        = $OPT->{maf_tail_filt};
 
     #load VCF file
-    my $vcf;
-    if($VCF{$vcf_file}){
-	$vcf = $VCF{$vcf_file};
-    }
-    else{
-	$vcf = Vcf->new(file=>"$vcf_file");
-	$vcf->parse_header();
-	$VCF{$vcf_file} = $vcf;
-    }
-
-    my ($SID) = grep {/$sid$/} $vcf->get_samples() if($sid);
-    $vcf->set_samples(include=>[$SID]) if($sid);
+    prepare_vcf($vcf_file);
+    my $vcf = $VCF{$vcf_file};
+    $vcf->set_samples(include=>[$sid]);
     
     #load reference VCF
     my $rvcf;
-    my $RID;
-    if($rvcf_file && $rvcf_file ne $vcf_file){
-	if($VCF{$rvcf_file}){
+    if($OPT->{use_ref}){
+	if($rvcf_file && $rvcf_file ne $vcf_file){
+	    prepare_vcf($rvcf_file);
 	    $rvcf = $VCF{$rvcf_file};
+	    $rvcf->set_samples(include=>[$rid]);
 	}
 	else{
-	    $rvcf = Vcf->new(file=>"$rvcf_file");
-	    $rvcf->parse_header();
-	    $VCF{$rvcf_file} = $rvcf;
+	    $vcf->set_samples(include=>[$sid, $rid]);
 	}
-	($RID) = grep {/$rid$/} $rvcf->get_samples() if($rid);
-	$rvcf->set_samples(include=>[$RID]) if($rid);
     }
-    elsif($rid){
-	($RID) = grep {/$rid$/} $vcf->get_samples();
-	$vcf->set_samples(include=>[$SID, $RID]);
-    }
-    
+
     #read in each region of work
     my @files;
     while (my $seg = shift @$work){
@@ -5338,11 +5391,11 @@ sub _discovery_segments_thread {
 	
 	#calculate first for separate reference VCF
 	my %ref_ok;
-	if($rvcf && $OPT->{use_ref}){
+	if($rvcf){
 	    $rvcf->open(region=> $seg);
 	    while(my $v = $rvcf->next_data_hash()){
 		my $pos = $v->{POS};
-		my $rAD = ($RID) ? $v->{gtypes}{$RID}{AD} : $v->{gtypes}{AD};
+		my $rAD = $v->{gtypes}{$rid}{AD};
 		if($rAD && $rAD ne '.'){
 		    my ($rc, $ac) = split(/,/, $rAD);
 		    my $cov = $rc+$ac;
@@ -5368,8 +5421,8 @@ sub _discovery_segments_thread {
 	    $start = $pos if(! $start);
 	    
 	    #always calculate  reference first if merged in same VCF
-	    if($OPT->{use_ref} && $RID && !$rvcf){
-		my $rAD = $v->{gtypes}{$RID}{AD};
+	    if($OPT->{use_ref} && !$rvcf){
+		my $rAD = $v->{gtypes}{$rid}{AD};
 		if($rAD && $rAD ne '.'){
 		    my ($rc, $ac) = split(/,/, $rAD);
 		    my $cov = $rc+$ac;
@@ -5384,7 +5437,7 @@ sub _discovery_segments_thread {
 	    }
 	    
 	    #calculate for sample
-	    my $sAD = ($SID) ? $v->{gtypes}{$SID}{AD} : $v->{gtypes}{AD};
+	    my $sAD = $v->{gtypes}{$sid}{AD};
 	    if($sAD && $sAD ne '.'){
 		my ($rc, $ac) = split(/,/, $sAD);
 		my $cov = $rc+$ac;
@@ -5629,6 +5682,7 @@ sub _coverage_fit {
     }
     @stats = grep {$_} @stats; #always missing 0
 
+    print STDERR "\n";
     foreach my $s (@curve){
     	my ($c, $t1, $cov_L_sum, $maf_L_sum, $L_sum) = @$s;
     

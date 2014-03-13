@@ -1,5 +1,11 @@
 #!/usr/bin/perl 
 
+eval 'exec /usr/bin/perl  -S $0 ${1+"$@"}'
+    if 0; # not running under some shell
+
+eval 'exec /usr/bin/perl  -S $0 ${1+"$@"}'
+    if 0; # not running under some shell
+
 #Hack to get around FindBin error where broken Carp is preloaded
 BEGIN {
     if(@ARGV == 1 && $ARGV[0] eq 'findbin'){
@@ -56,10 +62,9 @@ BEGIN {
     }
 
     $sort_exe = File::Which::which('sort');
-    $ksseg_exe = "/.mounts/labs/lakshmilab/private/scripts/src/KSseg.code/KSseg" if(!$ksseg_exe);
-    ($ksseg_exe) = grep {-f $_} ("$edir/*/ksseg", File::Which::which('KSseg')) if(! -f $ksseg_exe);
-    ($tabix_exe) = grep {-f $_} ("$edir/*/tabix", File::Which::which('tabix')) if(!$tabix_exe);
-    ($vcftools_exe) = grep {-f $_} ("$edir/*/bin/vcftools", File::Which::which('vcftools')) if(!$vcftools_exe);
+    ($ksseg_exe) = grep {-f $_} ("$FindBin::RealBin/KSseg", <$edir/*/KSseg>, <$edir/*/bin/KSseg>, File::Which::which('KSseg')) if(!$ksseg_exe);
+    ($tabix_exe) = grep {-f $_} (<$edir/*/tabix>, File::Which::which('tabix')) if(!$tabix_exe);
+    ($vcftools_exe) = grep {-f $_} (<$edir/*/bin/vcftools>, File::Which::which('vcftools')) if(!$vcftools_exe);
     ($bgzip_exe = $tabix_exe) =~ s/tabix$/bgzip/; #comes with tabix
 
     $hg19 = "$FindBin::RealBin/../data/hg19_random.fa";
@@ -71,6 +76,12 @@ BEGIN {
 	my $stat = waitpid(-1, WNOHANG);
 	last if(defined($last) && $stat eq $last);
 	$last = $stat;
+    }
+
+    foreach my $exe ($sort_exe, $bgzip_exe, $tabix_exe, $vcftools_exe, $ksseg_exe){
+	next if(!$exe);
+	my ($dir, $file) = $exe =~ /^(.*)\/([^\/]+)$/;
+	$ENV{PATH} .= ":$dir";
     }
 }
 
@@ -501,6 +512,8 @@ sub _vcf2ksseg_thread {
 	    my ($rc, $ac) = split(/,/, $sAD);
 	    next if(!defined($rc) || !defined($ac));
 	    my $c = $rc+$ac;
+	    $c ||= 0.001;
+
 	    push(@kdata, [_chrom($chr), $c]);
 	    $cov{$c}++;
 	    print $mfh "$pos\t$pos\n";
@@ -735,16 +748,16 @@ sub _chrom {
     if($id =~ /^chr(\d+)$/){
 	return $1;
     }
-    elsif($id eq 'chrX'){
+    elsif($id eq 'chrX' || $id eq 'X'){
 	return 23;
     }
-    elsif($id eq 'chrY'){
+    elsif($id eq 'chrY'|| $id eq 'Y'){
 	return 24;
     }
-    elsif($id eq 'chrXY'){
+    elsif($id eq 'chrXY' || $id eq 'XY'){
 	return 25;
     }
-    elsif($id eq 'chrM'){
+    elsif($id eq 'chrM' || $id eq 'M'){
 	return 26;
     }
     else{

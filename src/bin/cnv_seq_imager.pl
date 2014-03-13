@@ -1,5 +1,11 @@
 #!/usr/bin/perl 
 
+eval 'exec /usr/bin/perl  -S $0 ${1+"$@"}'
+    if 0; # not running under some shell
+
+eval 'exec /usr/bin/perl  -S $0 ${1+"$@"}'
+    if 0; # not running under some shell
+
 #Hack to get around FindBin error where broken Carp is preloaded
 BEGIN {
     if(@ARGV == 1 && $ARGV[0] eq 'findbin'){
@@ -118,6 +124,8 @@ while(my $line = <IN>){
     }
 
     my ($chrom, $pos, $id, $ref, $alt, $qual, $filter, $info, $format, @E) = @F;
+    $chrom = "chr$chrom" if(!$CHR{$chrom} && $CHR{"chr$chrom"});
+    next if(!$CHR{$chrom});
     last if($last && $chrom ne $last);
     $last = $chrom;
 
@@ -148,7 +156,6 @@ while(my $line = <IN>){
     next unless($tot);
 
     my $maf = $ca/$tot;
-    next if(!$CHR{$chrom});
     my $x = int((($pos-1)/($CHR{$chrom}-1)) * ($w-1));
     my $y = int($maf * ($h - 1));
 
@@ -228,6 +235,7 @@ while(my $line = <IN>){
 
     #get standard column values
     my ($chrom, $pos, $id, $ref, $alt, $qual, $filter, $info, $format, @E) = @F;
+    $chrom = "chr$chrom" if(!$CHR{$chrom} && $CHR{"chr$chrom"});
     next if(!$CHR{$chrom}); #skip unmapped chromosomes
     next if(-f "$name.$s.$chrom.png"); #skip finished chromosomes
 
