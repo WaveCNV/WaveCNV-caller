@@ -26,6 +26,9 @@ WaveCNV-caller
 	Tabix
 
 NOTE: You may need administrator rights to install some modules and tools.
+      Also make sure to add external tools to your PATH environmental variable.
+      You may also have to rerun the 'perl Build.PL' step belowif any tools
+      were missing during initial configuration.
 
 
 2. Installing WaveCNV-caller
@@ -55,7 +58,9 @@ NOTE: You may need administrator rights to install some modules and tools.
 
 3. To run WaveCNV-caller
 
-. Run .../WaveCNV/caller/bin/caller.pl with a segments file (see WaveCNV-segmenter), a VCF file, and optionally a BAM file for the sample and associated matched control/refererence. It is important to always supply a matched reference.
+. Run .../WaveCNV/caller/bin/caller.pl with a segments file (see WaveCNV-segmenter),
+  a VCF file, and optionally a BAM file for the sample and associated matched
+  control/refererence. It is important to always supply a matched reference.
 
   Example: .../WaveCNV/segmenter/bin/segmenter.pl trio1.pileup
 
