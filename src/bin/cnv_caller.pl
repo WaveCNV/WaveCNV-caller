@@ -572,8 +572,8 @@ sub validate_options {
     my $rbam_dir = $OPT->{rbam_dir};
     my $xbam_dir = $OPT->{xbam_dir};
     my $bam_list = $OPT->{bam_list};
-    my $rbam_list = $OPT->{rbam_list};
-    my $xbam_list = $OPT->{xbam_list};
+    my $rbam_list = $OPT->{ref}{bam_list};
+    my $xbam_list = $OPT->{xeno}{bam_list};
 
     #Am I using reference?
     if($OPT{ref}{sid} || $OPT{ref}{vcf_file} || $rbam_dir || $rbam_list){
